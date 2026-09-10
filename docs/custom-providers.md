@@ -49,7 +49,7 @@ catalog probe. `PASEO_PROVIDER_REFRESH_TIMEOUT_MS` sets it when the config field
 
 ## Extending a built-in provider
 
-Use `extends` to create a new provider entry that inherits from a built-in provider (claude, codex, copilot, opencode, pi, omp). The new provider gets its own entry in the provider list, with its own label, environment, and model definitions.
+Use `extends` to create a new provider entry that inherits from a built-in provider (claude, codex, copilot, opencode, pi, omp, antigravity). The new provider gets its own entry in the provider list, with its own label, environment, and model definitions.
 
 ```json
 {
@@ -677,19 +677,21 @@ When an `additionalModels` entry has the same `id` as a discovered model, it upd
 
 Every entry under `agents.providers` accepts these fields:
 
-| Field              | Type                      | Required          | Description                                                        |
-| ------------------ | ------------------------- | ----------------- | ------------------------------------------------------------------ |
-| `extends`          | `string`                  | Yes (custom only) | Built-in provider ID to inherit from, or `"acp"`                   |
-| `label`            | `string`                  | Yes (custom only) | Display name in the UI                                             |
-| `description`      | `string`                  | No                | Short description shown in the UI                                  |
-| `command`          | `string[]`                | Yes (ACP only)    | Command to spawn the agent process                                 |
-| `env`              | `Record<string, string>`  | No                | Environment variables to set for the agent process                 |
-| `params`           | `Record<string, unknown>` | No                | Provider-specific options such as `supportsMcpServers: false`      |
-| `models`           | `ProviderProfileModel[]`  | No                | Static model list (overrides runtime discovery)                    |
-| `additionalModels` | `ProviderProfileModel[]`  | No                | Static model additions (merged with runtime discovery or `models`) |
-| `disallowedTools`  | `string[]`                | No                | Tool names to disable for this provider (e.g. `["WebSearch"]`)     |
-| `enabled`          | `boolean`                 | No                | Set to `false` to hide the provider (default: `true`)              |
-| `order`            | `number`                  | No                | Sort order in the provider list                                    |
+| Field              | Type                      | Required          | Description                                                             |
+| ------------------ | ------------------------- | ----------------- | ----------------------------------------------------------------------- |
+| `extends`          | `string`                  | Yes (custom only) | Built-in provider ID to inherit from, or `"acp"`                        |
+| `label`            | `string`                  | Yes (custom only) | Display name in the UI                                                  |
+| `description`      | `string`                  | No                | Short description shown in the UI                                       |
+| `systemPrompt`     | `string`                  | No                | Instructions prepended to new sessions and persisted for resume         |
+| `defaultModeId`    | `string`                  | No                | Native mode default for new sessions; an explicit mode takes precedence |
+| `command`          | `string[]`                | Yes (ACP only)    | Command to spawn the agent process                                      |
+| `env`              | `Record<string, string>`  | No                | Environment variables to set for the agent process                      |
+| `params`           | `Record<string, unknown>` | No                | Provider-specific options such as `supportsMcpServers: false`           |
+| `models`           | `ProviderProfileModel[]`  | No                | Static model list (overrides runtime discovery)                         |
+| `additionalModels` | `ProviderProfileModel[]`  | No                | Static model additions (merged with runtime discovery or `models`)      |
+| `disallowedTools`  | `string[]`                | No                | Tool names to disable for this provider (e.g. `["WebSearch"]`)          |
+| `enabled`          | `boolean`                 | No                | Set to `false` to hide the provider (default: `true`)                   |
+| `order`            | `number`                  | No                | Sort order in the provider list                                         |
 
 ### Model definition
 
@@ -743,7 +745,7 @@ Use `disallowedTools` to disable unsupported tools:
 
 ### Valid `extends` values
 
-Built-in providers: `claude`, `codex`, `copilot`, `opencode`, `pi`, `omp`
+Built-in providers: `claude`, `codex`, `copilot`, `opencode`, `pi`, `omp`, `antigravity`
 
 Special value: `acp` — creates a generic ACP provider (requires `command`)
 

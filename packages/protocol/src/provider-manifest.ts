@@ -142,6 +142,38 @@ const OPENCODE_MODES: AgentProviderModeDefinition[] = [
   },
 ];
 
+const ANTIGRAVITY_MODES: AgentProviderModeDefinition[] = [
+  {
+    id: "full-access",
+    label: "Full Access",
+    description: "Run native Antigravity tools without interactive approval prompts.",
+    icon: "ShieldOff",
+    colorTier: "dangerous",
+    isUnattended: true,
+  },
+  {
+    id: "default",
+    label: "Default",
+    description: "Use Antigravity's default headless permission behavior.",
+    icon: "Shield",
+    colorTier: "safe",
+  },
+  {
+    id: "accept-edits",
+    label: "Accept Edits",
+    description: "Let Antigravity accept file edits while retaining its other checks.",
+    icon: "ShieldPlus",
+    colorTier: "moderate",
+  },
+  {
+    id: "plan",
+    label: "Plan",
+    description: "Use Antigravity plan mode for read-only analysis.",
+    icon: "ShieldEllipsis",
+    colorTier: "planning",
+  },
+];
+
 export const OMP_MODES: AgentProviderModeDefinition[] = [
   {
     id: "full",
@@ -254,6 +286,13 @@ export const AGENT_PROVIDER_DEFINITIONS: AgentProviderDefinition[] = [
     enabledByDefault: false,
     defaultModeId: "full",
     modes: OMP_MODES,
+  },
+  {
+    id: "antigravity",
+    label: "Antigravity",
+    description: "Google Antigravity CLI with native sessions and streaming.",
+    defaultModeId: "full-access",
+    modes: ANTIGRAVITY_MODES,
   },
 ];
 

@@ -1,3 +1,7 @@
+> **Paseo SLP:** a small fork of upstream v0.8.0 for role profiles and native
+> Antigravity support. See [the fork's scope and operating notes](docs/slp.md).
+> The installation links below describe upstream Paseo.
+
 <p align="center">
   <img src="packages/website/public/logo.svg" width="64" height="64" alt="Paseo logo">
 </p>

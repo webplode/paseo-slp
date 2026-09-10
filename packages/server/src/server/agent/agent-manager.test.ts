@@ -1741,6 +1741,107 @@ test("normalizeConfig injects the provider default model while leaving mode omit
   expect(snapshot.config.modeId).toBeUndefined();
 });
 
+test("provider defaults compose on create, preserve explicit mode, and survive resume", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-defaults-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient("codex-role");
+  const manager = new AgentManager({
+    clients: { "codex-role": client },
+    providerDefinitions: {
+      "codex-role": {
+        enabled: true,
+        systemPrompt: "Role instructions.",
+        configuredDefaultModeId: "full-access",
+      },
+    },
+    registry: storage,
+    logger,
+  });
+  const createdId = "00000000-0000-4000-8000-000000000107";
+  const resumedId = "00000000-0000-4000-8000-000000000108";
+  const explicitId = "00000000-0000-4000-8000-000000000109";
+  const composedPrompt = "Role instructions.\n\nTask instructions.";
+
+  try {
+    const created = await manager.createAgent(
+      {
+        provider: "codex-role",
+        cwd: workdir,
+        systemPrompt: "Task instructions.",
+      },
+      createdId,
+      { workspaceId: undefined },
+    );
+
+    expect(created.config).toMatchObject({
+      modeId: "full-access",
+      systemPrompt: composedPrompt,
+    });
+    expect(client.createdConfigs[0]).toMatchObject({
+      modeId: "full-access",
+      systemPrompt: composedPrompt,
+    });
+
+    await storage.flush();
+    const record = await storage.get(createdId);
+    expect(record?.config).toMatchObject({
+      modeId: "full-access",
+      systemPrompt: composedPrompt,
+    });
+
+    await manager.closeAgent(createdId);
+
+    const resumed = await manager.resumeAgentFromPersistence(
+      {
+        provider: "codex-role",
+        sessionId: "role-session",
+        metadata: {
+          provider: "codex-role",
+          cwd: workdir,
+          modeId: "full-access",
+          systemPrompt: composedPrompt,
+        },
+      },
+      undefined,
+      resumedId,
+      { workspaceId: undefined },
+    );
+
+    expect(resumed.config).toMatchObject({
+      modeId: "full-access",
+      systemPrompt: composedPrompt,
+    });
+    expect(client.resumeOverrides.at(-1)).toMatchObject({
+      modeId: "full-access",
+      systemPrompt: composedPrompt,
+    });
+    expect(client.resumeOverrides.at(-1)?.systemPrompt).not.toContain(
+      "Role instructions.\n\nRole instructions.",
+    );
+
+    const explicit = await manager.createAgent(
+      {
+        provider: "codex-role",
+        cwd: workdir,
+        modeId: "explicit-mode",
+        systemPrompt: "Task instructions.",
+      },
+      explicitId,
+      { workspaceId: undefined },
+    );
+
+    expect(explicit.config.modeId).toBe("explicit-mode");
+    expect(explicit.config.systemPrompt).toBe(composedPrompt);
+  } finally {
+    await manager.closeAgent(createdId).catch(() => undefined);
+    await manager.closeAgent(resumedId).catch(() => undefined);
+    await manager.closeAgent(explicitId).catch(() => undefined);
+    await manager.flushForShutdown().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("normalizeConfig leaves Claude mode omitted", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-claude-default-test-"));
   const manager = new AgentManager({

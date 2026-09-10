@@ -186,7 +186,13 @@ export interface AgentManagerProviderState {
       AgentProvider,
       Pick<
         ProviderDefinition,
-        "enabled" | "derivedFromProviderId" | "validateOptions" | "applyOptions" | "applyToolPolicy"
+        | "enabled"
+        | "derivedFromProviderId"
+        | "validateOptions"
+        | "applyOptions"
+        | "applyToolPolicy"
+        | "systemPrompt"
+        | "configuredDefaultModeId"
       >
     >
   >;
@@ -368,6 +374,8 @@ export class ProviderSnapshotManager {
       providerDefinitions[provider] = {
         enabled: definition.enabled,
         derivedFromProviderId: definition.derivedFromProviderId,
+        systemPrompt: definition.systemPrompt,
+        configuredDefaultModeId: definition.configuredDefaultModeId,
         validateOptions: definition.validateOptions,
         applyOptions: definition.applyOptions,
         applyToolPolicy: definition.applyToolPolicy,
@@ -538,9 +546,12 @@ export class ProviderSnapshotManager {
     });
     const definition = this.requireProvider(input.provider);
     const parent = input.parent ? this.resolveParent(input.parent) : null;
+    const requestedMode =
+      input.requestedMode ??
+      (!parent && !input.unattended ? definition.configuredDefaultModeId : undefined);
     return definition.resolveCreateConfig({
       provider: input.provider,
-      requestedMode: input.requestedMode,
+      requestedMode,
       featureValues: input.featureValues,
       parent,
       unattended: input.unattended || parent?.isUnattended === true,

@@ -79,6 +79,7 @@ import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import { composeSystemPromptParts } from "./system-prompt.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -265,6 +266,8 @@ interface AgentManagerRescueTimeouts {
 interface ProviderEnabledFlag {
   enabled: boolean;
   derivedFromProviderId?: string | null;
+  systemPrompt?: string;
+  configuredDefaultModeId?: string;
   validateOptions?: (options: ProviderOptions | undefined) => ProviderOptions | undefined;
   applyOptions?: (
     config: AgentSessionConfig,
@@ -284,6 +287,8 @@ export interface CreateAgentOptions {
   env?: Record<string, string>;
   persistSession?: boolean;
   initialTitle?: string | null;
+  /** Internal restore path: the stored config already contains provider defaults. */
+  restoreStoredConfig?: boolean;
   // undefined is an explicit decision: the agent never appears in the sidebar.
   workspaceId: string | undefined;
   owner?: AgentOwner;
@@ -1225,6 +1230,7 @@ export class AgentManager {
       config,
       resolvedAgentId,
       options?.env,
+      { applyProviderDefaults: options.restoreStoredConfig !== true },
     );
     this.requireEnabledProvider(storedConfig.provider);
     const client = await this.requireAvailableClient({
@@ -5038,8 +5044,20 @@ export class AgentManager {
     config: AgentSessionConfig,
     agentId: string,
     env?: Record<string, string>,
+    options: { applyProviderDefaults?: boolean } = {},
   ): Promise<PreparedSessionConfig> {
-    const storedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(config), { env });
+    const sessionConfig = { ...stripInternalPaseoMcpServer(config) };
+    if (options.applyProviderDefaults) {
+      const defaults = this.providerDefinitions.get(sessionConfig.provider);
+      sessionConfig.modeId ??= defaults?.configuredDefaultModeId;
+      if (defaults?.systemPrompt) {
+        sessionConfig.systemPrompt = composeSystemPromptParts(
+          defaults.systemPrompt,
+          sessionConfig.systemPrompt,
+        );
+      }
+    }
+    const storedConfig = await this.normalizeConfig(sessionConfig, { env });
     const paseoToolPolicy = this.paseoToolsEnabled
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
