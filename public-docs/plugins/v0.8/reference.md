@@ -477,9 +477,12 @@ type PluginTurnOutcome =
 
 | Name                 | Request fields                                                          | Editable                                |
 | -------------------- | ----------------------------------------------------------------------- | --------------------------------------- |
-| `agent.create`       | `config`, optional `env`                                                | Public agent config except `cwd`; `env` |
+| `agent.create`       | `config`, optional `env`, optional read-only `labels`                   | Public agent config except `cwd`; `env` |
 | `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env` | Only `env`                              |
 | `workspace.create`   | `source`, optional `title`, `firstAgentContext`                         | Entire explicit creation request        |
+
+The optional `agent.create.labels` map is copied from the caller's creation request. Plugins can
+inspect it to select their behavior, but cannot add, remove, or change labels.
 
 **`agent.create.config`** uses `AgentSessionConfig`:
 
@@ -490,8 +493,16 @@ type PluginTurnOutcome =
 | `title`, `systemPrompt`                       | Agent configuration                                                        |
 | `providerOptions`                             | Provider-specific validated options                                        |
 | `mcpServers`, `toolPolicy`                    | MCP configuration and exact-tool preapprovals                              |
+| `paseoToolAllowlist`                          | Optional per-agent ceiling for daemon-provided Paseo tool names            |
 | `cwd`                                         | Cannot change                                                              |
 | `internal`                                    | Daemon-owned; cannot change through this hook                              |
+
+Omitting `paseoToolAllowlist` preserves the host/provider Paseo tool surface. An empty
+array exposes no Paseo tools. A non-empty array is intersected with host and provider
+restrictions, so a hook cannot re-enable a disabled tool and newly added tool names stay
+excluded until listed. The ceiling applies to native tool delivery and the agent-scoped
+Paseo MCP catalog and dispatch. It does not filter unrelated provider tools or enforce
+filesystem access.
 
 **`agent.session_open` request example:**
 

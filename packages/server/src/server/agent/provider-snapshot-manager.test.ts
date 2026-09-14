@@ -267,6 +267,19 @@ describe("ProviderSnapshotManager public surface", () => {
     }
   });
 
+  test("carries exact MCP preapproval support into the agent manager boundary", () => {
+    const manager = new ProviderSnapshotManager({ logger: createTestLogger() });
+
+    try {
+      const definitions = manager.getAgentManagerProviderState().providerDefinitions;
+      expect(definitions.codex?.supportsExactMcpPreapproval).toBe(true);
+      expect(definitions.claude?.supportsExactMcpPreapproval).toBe(true);
+      expect(definitions.antigravity?.supportsExactMcpPreapproval).toBe(true);
+    } finally {
+      manager.destroy();
+    }
+  });
+
   test("getProviderLabel returns the override label when provided", () => {
     const manager = new ProviderSnapshotManager({
       logger: createTestLogger(),
@@ -1346,79 +1359,6 @@ describe("ProviderSnapshotManager public surface", () => {
           availableModes: modes,
         },
       ]);
-    } finally {
-      manager.destroy();
-    }
-  });
-
-  test("provider defaults apply only when create mode is omitted and preserve unattended selection", async () => {
-    const modes: AgentMode[] = [
-      { id: "manual", label: "Manual" },
-      { id: "full-access", label: "Full access", isUnattended: true },
-    ];
-    const manager = new ProviderSnapshotManager({
-      logger: createTestLogger(),
-      providerOverrides: {
-        codex: {
-          defaultModeId: "manual",
-          systemPrompt: "Role instructions.",
-        },
-        claude: { enabled: false },
-        copilot: { enabled: false },
-        opencode: { enabled: false },
-        pi: { enabled: false },
-        antigravity: { enabled: false },
-      },
-      extraClients: {
-        codex: createExtraClient("codex", {
-          async isAvailable() {
-            return true;
-          },
-          async fetchCatalog() {
-            return { models: [] as AgentModelDefinition[], modes };
-          },
-        }),
-      },
-    });
-
-    try {
-      expect(manager.getAgentManagerProviderState().providerDefinitions.codex).toMatchObject({
-        systemPrompt: "Role instructions.",
-        configuredDefaultModeId: "manual",
-      });
-
-      await expect(
-        manager.resolveCreateConfig({
-          cwd: "/tmp/project",
-          provider: "codex",
-          requestedMode: undefined,
-          featureValues: undefined,
-          parent: null,
-          unattended: false,
-        }),
-      ).resolves.toMatchObject({ modeId: "manual" });
-
-      await expect(
-        manager.resolveCreateConfig({
-          cwd: "/tmp/project",
-          provider: "codex",
-          requestedMode: "full-access",
-          featureValues: undefined,
-          parent: null,
-          unattended: false,
-        }),
-      ).resolves.toMatchObject({ modeId: "full-access" });
-
-      await expect(
-        manager.resolveCreateConfig({
-          cwd: "/tmp/project",
-          provider: "codex",
-          requestedMode: undefined,
-          featureValues: undefined,
-          parent: null,
-          unattended: true,
-        }),
-      ).resolves.toMatchObject({ modeId: "full-access" });
     } finally {
       manager.destroy();
     }

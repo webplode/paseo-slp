@@ -25,7 +25,6 @@ import {
   resolveDefaultAgentCreateConfig,
 } from "./create-agent-mode.js";
 import { normalizeAgentModelDefinition } from "./agent-sdk-types.js";
-import { composeSystemPromptParts } from "./system-prompt.js";
 import { runProviderRefreshActivity } from "./provider-refresh-deadline.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
 import type { ManagedProcessRegistry } from "../managed-processes/managed-processes.js";
@@ -76,10 +75,6 @@ export interface ProviderDefinition extends AgentProviderDefinition {
   configuration: Omit<ResolvedProvider, "createBaseClient" | "contract"> | null;
   iconSvg?: string;
   enabled: boolean;
-  /** Instruction text to apply to new sessions for this configured provider. */
-  systemPrompt?: string;
-  /** Explicit default mode from provider configuration, distinct from the built-in default. */
-  configuredDefaultModeId?: string;
   /**
    * The id of another *registered* provider this one extends (e.g. a Z.AI
    * profile that extends "claude"). null for built-in providers and for
@@ -143,8 +138,6 @@ type ProviderClientFactory = (
 interface ResolvedProvider {
   definition: AgentProviderDefinition;
   runtimeSettings?: ProviderRuntimeSettings;
-  systemPrompt?: string;
-  configuredDefaultModeId?: string;
   profileModels: ProviderProfileModel[];
   additionalModels: ProviderProfileModel[];
   profileModelsAreAdditive: boolean;
@@ -167,6 +160,7 @@ const PROVIDER_CONTRACTS: Record<string, ProviderContract> = {
   claude: { optionsSchema: ClaudeProviderOptionsSchema, supportsExactMcpPreapproval: true },
   codex: { optionsSchema: CodexProviderOptionsSchema, supportsExactMcpPreapproval: true },
   opencode: { optionsSchema: OpenCodeProviderOptionsSchema, supportsExactMcpPreapproval: true },
+  antigravity: { optionsSchema: EmptyProviderOptionsSchema, supportsExactMcpPreapproval: true },
 };
 
 const UNSUPPORTED_PROVIDER_CONTRACT: ProviderContract = {
@@ -242,10 +236,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       runtime: options?.ompRuntime,
     }),
   antigravity: (logger, runtimeSettings) =>
-    new AntigravityNativeAgentClient({
-      logger,
-      runtimeSettings,
-    }),
+    new AntigravityNativeAgentClient({ logger, runtimeSettings }),
   mock: (logger) => new MockLoadTestAgentClient(logger),
   "mock-slow": () => new MockSlowProviderClient(),
 };
@@ -324,7 +315,6 @@ function applyOverrideToDefinition(
     ...definition,
     label: override.label ?? definition.label,
     description: override.description ?? definition.description,
-    defaultModeId: override.defaultModeId ?? definition.defaultModeId,
   };
 }
 
@@ -342,7 +332,6 @@ function createDerivedDefinition(
     id: providerId,
     label: override.label,
     description: override.description ?? baseDefinition.description,
-    defaultModeId: override.defaultModeId ?? baseDefinition.defaultModeId,
   };
 }
 
@@ -631,8 +620,6 @@ function createRegistryEntry(
     ...resolved.definition,
     configuration,
     enabled: resolved.enabled,
-    systemPrompt: resolved.systemPrompt,
-    configuredDefaultModeId: resolved.configuredDefaultModeId,
     derivedFromProviderId: resolved.derivedFromProviderId,
     optionsSchema: resolved.contract.optionsSchema,
     supportsExactMcpPreapproval: resolved.contract.supportsExactMcpPreapproval,
@@ -670,18 +657,14 @@ function createRegistryEntry(
           const defaultModeId = await runProviderRefreshActivity(
             context,
             "default-mode",
-            async () => {
-              if (resolved.configuredDefaultModeId !== undefined) {
-                return resolved.configuredDefaultModeId;
-              }
-              return await catalogClient.resolveDefaultModeId?.({
+            async () =>
+              await catalogClient.resolveDefaultModeId?.({
                 config: {
                   provider,
                   cwd: options.scope === "workspace" ? options.cwd : process.cwd(),
                 },
                 signal: context?.signal,
-              });
-            },
+              }),
           );
           return {
             models,
@@ -690,14 +673,7 @@ function createRegistryEntry(
           };
         }
         const catalog = await catalogClient.fetchCatalog(options, context);
-        return {
-          ...catalog,
-          models,
-          modes: decorateModes(catalog.modes),
-          ...(resolved.configuredDefaultModeId !== undefined
-            ? { defaultModeId: resolved.configuredDefaultModeId }
-            : {}),
-        };
+        return { ...catalog, models, modes: decorateModes(catalog.modes) };
       }
 
       const catalog = await catalogClient.fetchCatalog(options, context);
@@ -707,9 +683,6 @@ function createRegistryEntry(
           profileModelsAreAdditive: resolved.profileModelsAreAdditive,
         }),
         modes: decorateModes(catalog.modes),
-        ...(resolved.configuredDefaultModeId !== undefined
-          ? { defaultModeId: resolved.configuredDefaultModeId }
-          : {}),
       };
     },
   };
@@ -762,8 +735,6 @@ function buildResolvedBuiltinProviders(
     resolvedProviders.set(definition.id, {
       definition: applyOverrideToDefinition(definition, override),
       runtimeSettings: mergedRuntimeSettings,
-      systemPrompt: composeSystemPromptParts(override?.systemPrompt),
-      configuredDefaultModeId: override?.defaultModeId,
       profileModels: override?.models ?? [],
       additionalModels: override?.additionalModels ?? [],
       profileModelsAreAdditive: false,
@@ -819,8 +790,6 @@ function addDerivedProviders(
           override,
         ),
         runtimeSettings: toRuntimeSettings(override),
-        systemPrompt: composeSystemPromptParts(override.systemPrompt),
-        configuredDefaultModeId: override.defaultModeId,
         profileModels: override.models ?? [],
         additionalModels: override.additionalModels ?? [],
         profileModelsAreAdditive: false,
@@ -877,8 +846,6 @@ function addDerivedProviders(
     resolvedProviders.set(providerId, {
       definition: createDerivedDefinition(providerId, baseDefinition, override),
       runtimeSettings: mergedRuntimeSettings,
-      systemPrompt: composeSystemPromptParts(baseProvider.systemPrompt, override.systemPrompt),
-      configuredDefaultModeId: override.defaultModeId ?? baseProvider.configuredDefaultModeId,
       profileModels: override.models ?? [],
       additionalModels: override.additionalModels ?? [],
       profileModelsAreAdditive: false,

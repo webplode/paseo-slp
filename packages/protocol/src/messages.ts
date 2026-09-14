@@ -490,6 +490,7 @@ const AgentSessionConfigSchema = z.object({
   toolPolicy: ToolPolicySchema.optional(),
   systemPrompt: z.string().optional(),
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
+  paseoToolAllowlist: z.array(z.string()).optional(),
 });
 
 const AgentPermissionUpdateSchema = z.record(z.string(), z.unknown());

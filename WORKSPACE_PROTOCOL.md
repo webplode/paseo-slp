@@ -12,4 +12,4 @@ Readers: Lead; Supervisor when assigned to review or change this protocol.
 - Authority: assignments grant exact write scope and external actions. Full access is the requested runtime default and does not grant project acceptance or expand that scope.
 - Escalation: bring failed premises, dependencies, and blocked prerequisites to Lead with evidence. Human decides changes to product scope, shared live services, and irreversible actions.
 - Tracking: use the current assignment and Git evidence. Add an issue tracker only when this project needs one; none is required to start an agent.
-- Evolution: keep causal observations in ordinary notes when useful. Add a rule only for a reproduced problem; remove it when its cost exceeds its benefit. Do not encode this protocol as daemon admission logic.
+- Evolution: keep novel or materially stronger causal observations in `SUPERVISOR_NOTEBOOK.md` and aggregate recurrence by pattern. Add a rule only for a reproduced problem; remove it when its cost exceeds its benefit. Do not encode this protocol as daemon admission logic.

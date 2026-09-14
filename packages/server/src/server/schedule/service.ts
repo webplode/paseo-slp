@@ -335,6 +335,7 @@ export class ScheduleService {
       pausedAt: null,
       expiresAt: input.expiresAt ?? null,
       maxRuns: normalizeMaxRuns(input.maxRuns),
+      ...(input.silentOnSuccess ? { silentOnSuccess: true } : {}),
       runs: [],
     };
   }
@@ -371,6 +372,7 @@ export class ScheduleService {
           nextRunAt: nextRunAt.toISOString(),
           expiresAt: input.expiresAt ?? null,
           maxRuns: normalizeMaxRuns(input.maxRuns),
+          ...(input.silentOnSuccess ? { silentOnSuccess: true } : { silentOnSuccess: undefined }),
           updatedAt: now.toISOString(),
         };
       },
@@ -858,6 +860,10 @@ export class ScheduleService {
       await startAgentRun(this.agentManager, agent.id, wrappedPrompt, this.logger, {
         replaceRunning: true,
         activeTurnBehavior: "steer",
+        runOptions: {
+          clientMessageId: runId,
+          suppressFinishAttention: schedule.silentOnSuccess === true,
+        },
       });
       const waitResult = await this.agentManager.waitForAgentEvent(agent.id, {
         waitForActive: true,

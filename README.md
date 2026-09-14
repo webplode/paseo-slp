@@ -1,4 +1,4 @@
-> **Paseo SLP:** a small fork of upstream v0.8.0 for role profiles and native
+> **Paseo SLP:** the active Paseo fork for an SLP role/profile plugin, its priority skill bundle, and native
 > Antigravity support. See [the fork's scope and operating notes](docs/slp.md).
 > The installation links below describe upstream Paseo.
 

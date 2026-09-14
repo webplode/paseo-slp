@@ -7,6 +7,7 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager } from "./agent-manager.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { AgentStorage } from "./agent-storage.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type {
   AgentClient,
   AgentLaunchContext,
@@ -81,12 +82,33 @@ test("loads archived records for history and active records with the interactive
   }
 });
 
-test("restores a stored config without reapplying provider defaults when persistence is unavailable", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-provider-defaults-"));
+test("restores a stored config without reapplying plugin creation transforms", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-plugin-transforms-"));
   const logger = createTestLogger();
   const storage = new AgentStorage(path.join(root, "agents"), logger);
   const baseClient = createTestAgentClient("codex-role");
   const createdConfigs: AgentSessionConfig[] = [];
+  const creationRequests: AgentSessionConfig[] = [];
+  const rolePrompt = "Role instructions.";
+  const taskPrompt = "Task instructions.";
+  const composedPrompt = `${rolePrompt}\n\n${taskPrompt}`;
+  const pluginLifecycle = {
+    before: async (name: string, request: { config: AgentSessionConfig }) => {
+      if (name !== "agent.create") {
+        return request;
+      }
+      creationRequests.push(request.config);
+      return {
+        ...request,
+        config: {
+          ...request.config,
+          modeId: "full-access",
+          systemPrompt: [rolePrompt, request.config.systemPrompt].filter(Boolean).join("\n\n"),
+        },
+      };
+    },
+    emit: () => undefined,
+  } as unknown as PluginLifecycle;
   const client: AgentClient = {
     provider: baseClient.provider,
     capabilities: baseClient.capabilities,
@@ -104,25 +126,24 @@ test("restores a stored config without reapplying provider defaults when persist
   };
   const manager = new AgentManager({
     clients: { "codex-role": client },
+    pluginLifecycle,
     providerDefinitions: {
       "codex-role": {
         enabled: true,
-        systemPrompt: "Role instructions.",
-        configuredDefaultModeId: "full-access",
       },
     },
     registry: storage,
     logger,
   });
   const agentId = "00000000-0000-4000-8000-000000000303";
-  const composedPrompt = "Role instructions.\n\nTask instructions.";
 
   try {
     await manager.createAgent(
       {
         provider: "codex-role",
         cwd: root,
-        systemPrompt: "Task instructions.",
+        systemPrompt: taskPrompt,
+        paseoToolAllowlist: [],
       },
       agentId,
       { workspaceId: "workspace-role" },
@@ -134,6 +155,9 @@ test("restores a stored config without reapplying provider defaults when persist
       modeId: "full-access",
       systemPrompt: composedPrompt,
     });
+    expect(stored?.config?.systemPrompt).toBe(composedPrompt);
+    expect(stored?.config?.paseoToolAllowlist).toEqual([]);
+    expect(creationRequests).toHaveLength(1);
     expect(stored).not.toBeNull();
 
     await storage.upsert({ ...stored!, persistence: null });
@@ -148,9 +172,9 @@ test("restores a stored config without reapplying provider defaults when persist
       modeId: "full-access",
       systemPrompt: composedPrompt,
     });
-    expect(createdConfigs[1]?.systemPrompt).not.toContain(
-      "Role instructions.\n\nRole instructions.",
-    );
+    expect(createdConfigs[1]?.systemPrompt).toBe(composedPrompt);
+    expect(createdConfigs[1]?.paseoToolAllowlist).toEqual([]);
+    expect(creationRequests).toHaveLength(1);
   } finally {
     await manager.closeAgent(agentId).catch(() => undefined);
     await manager.flushForShutdown().catch(() => undefined);

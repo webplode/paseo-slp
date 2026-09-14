@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { ChildProcess } from "node:child_process";
@@ -14,6 +14,7 @@ import type {
   AgentLaunchContext,
   AgentMode,
   AgentModelDefinition,
+  McpServerConfig,
   AgentPermissionRequest,
   AgentPermissionResponse,
   AgentPersistenceHandle,
@@ -67,6 +68,12 @@ export const ANTIGRAVITY_PLAN_MODE_ID = "plan";
 const DEFAULT_COMMAND = "agy";
 const DEFAULT_PRINT_TIMEOUT = "30m";
 const MAX_STDERR_LENGTH = 32 * 1024;
+const DEFAULT_PERMISSION_SETTINGS_PATH = join(
+  homedir(),
+  ".gemini",
+  "antigravity-cli",
+  "settings.json",
+);
 
 export const ANTIGRAVITY_MODES: AgentMode[] = [
   {
@@ -105,7 +112,7 @@ const CAPABILITIES: AgentCapabilityFlags = {
   supportsSessionPersistence: true,
   supportsSessionListing: false,
   supportsDynamicModes: false,
-  supportsMcpServers: false,
+  supportsMcpServers: true,
   supportsNativePaseoTools: false,
   supportsReasoningStream: false,
   supportsToolInvocations: true,
@@ -173,6 +180,67 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function mcpPermissionMatches(rule: string, server: string, tool: string): boolean {
+  return rule === "mcp(*)" || rule === `mcp(${server}/*)` || rule === `mcp(${server}/${tool})`;
+}
+
+async function assertExactMcpPreapproval(
+  config: AgentSessionConfig,
+  settingsPath: string,
+): Promise<void> {
+  const grants = config.toolPolicy?.preapproved ?? [];
+  if (grants.length === 0) return;
+
+  let settings: unknown;
+  try {
+    settings = JSON.parse(await readFile(settingsPath, "utf8"));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Antigravity cannot run preapproved MCP tools until ${settingsPath} is readable JSON (${reason})`,
+      { cause: error },
+    );
+  }
+  const permissions =
+    isRecord(settings) && isRecord(settings.permissions) ? settings.permissions : {};
+  const allow = stringArray(permissions.allow);
+  const ask = stringArray(permissions.ask);
+  const deny = stringArray(permissions.deny);
+  const missing: string[] = [];
+  const blocked: string[] = [];
+
+  for (const grant of grants) {
+    const resource = `mcp(${grant.server}/${grant.tool})`;
+    if (!allow.includes(resource)) missing.push(resource);
+    if (
+      deny.some((rule) => mcpPermissionMatches(rule, grant.server, grant.tool)) ||
+      ask.some((rule) => mcpPermissionMatches(rule, grant.server, grant.tool))
+    ) {
+      blocked.push(resource);
+    }
+  }
+  if (missing.length === 0 && blocked.length === 0) return;
+
+  const details = [
+    missing.length > 0 ? `missing permissions.allow entries: ${missing.join(", ")}` : "",
+    blocked.length > 0
+      ? `matching permissions.ask/deny entries take precedence for: ${blocked.join(", ")}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+  throw new Error(
+    `Antigravity cannot preapprove the exact MCP tools required by this session; ${details}. ` +
+      `Add only the named rules to ${settingsPath}; broad mcp(*) or mcp(server/*) allow rules are not accepted as exact grants.`,
+  );
+}
+
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -231,20 +299,48 @@ function profilePolicyForMode(modeId: string): "sandbox" | "auto" | "eager" {
   return "sandbox";
 }
 
-function profileNameForInstructions(instructions: string): string {
-  return `paseo-${createHash("sha256").update(instructions).digest("hex").slice(0, 20)}`;
+function profileNameForConfig(instructions: string, mcpServers: Record<string, unknown>): string {
+  return `paseo-${createHash("sha256")
+    .update(instructions)
+    .update(JSON.stringify(mcpServers))
+    .digest("hex")
+    .slice(0, 20)}`;
+}
+
+function toAntigravityMcpServer(config: McpServerConfig): Record<string, unknown> {
+  if (config.type === "stdio") {
+    return {
+      command: config.command,
+      ...(config.args ? { args: config.args } : {}),
+      ...(config.env ? { env: config.env } : {}),
+    };
+  }
+  return {
+    serverUrl: config.url,
+    ...(config.headers ? { headers: config.headers } : {}),
+  };
+}
+
+function toAntigravityMcpServers(
+  servers: Record<string, McpServerConfig> | undefined,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(servers ?? {}).map(([name, config]) => [name, toAntigravityMcpServer(config)]),
+  );
 }
 
 function buildProfileContents(name: string, instructions: string, modeId: string): string {
+  const nativeTools =
+    modeId === ANTIGRAVITY_PLAN_MODE_ID
+      ? ["view_file", "grep_search"]
+      : ["run_command", "view_file", "replace_file_content", "grep_search"];
   return [
     "---",
     `name: ${name}`,
     "description: Paseo native Antigravity session instructions",
+    "inheritCustomizations: false",
     "tools:",
-    "  - run_command",
-    "  - view_file",
-    "  - replace_file_content",
-    "  - grep_search",
+    ...nativeTools.map((tool) => `  - ${tool}`),
     `commandExecutionPolicy: ${profilePolicyForMode(modeId)}`,
     "---",
     "",
@@ -262,20 +358,30 @@ async function materializeProfile(
     config.systemPrompt,
     config.daemonAppendSystemPrompt,
   );
-  if (!instructions) return null;
+  const mcpServers = toAntigravityMcpServers(config.mcpServers);
+  if (!instructions && Object.keys(mcpServers).length === 0) return null;
+  const instructionText = instructions ?? "";
 
   const parent = temporaryRoot ?? tmpdir();
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const addDir = await mkdtemp(join(parent, "paseo-antigravity-"));
-  const name = profileNameForInstructions(instructions);
+  const name = profileNameForConfig(instructionText, mcpServers);
   const profilePath = join(addDir, ".agents", "agents", name, "agent.md");
+  const mcpConfigPath = join(addDir, ".agents", "mcp_config.json");
   try {
     await mkdir(dirname(profilePath), { recursive: true, mode: 0o700 });
-    await writeFile(profilePath, buildProfileContents(name, instructions, modeId), {
+    await writeFile(profilePath, buildProfileContents(name, instructionText, modeId), {
       encoding: "utf8",
       mode: 0o600,
       flag: "wx",
     });
+    if (Object.keys(mcpServers).length > 0) {
+      await writeFile(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2), {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+    }
   } catch (error) {
     await rm(addDir, { recursive: true, force: true });
     throw error;
@@ -812,6 +918,7 @@ export interface AntigravityNativeAgentClientOptions {
   providerId?: string;
   label?: string;
   temporaryRoot?: string;
+  permissionSettingsPath?: string;
   terminateProcess?: ProcessTerminator;
 }
 
@@ -821,6 +928,7 @@ export class AntigravityNativeAgentClient implements AgentClient {
   private readonly label: string;
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly temporaryRoot?: string;
+  private readonly permissionSettingsPath: string;
   private readonly terminateProcess: ProcessTerminator;
 
   constructor(private readonly options: AntigravityNativeAgentClientOptions) {
@@ -828,6 +936,8 @@ export class AntigravityNativeAgentClient implements AgentClient {
     this.label = options.label ?? "Antigravity";
     this.runtimeSettings = options.runtimeSettings;
     this.temporaryRoot = options.temporaryRoot;
+    this.permissionSettingsPath =
+      options.permissionSettingsPath ?? DEFAULT_PERMISSION_SETTINGS_PATH;
     this.terminateProcess = options.terminateProcess ?? terminateWithTreeKill;
   }
 
@@ -857,6 +967,7 @@ export class AntigravityNativeAgentClient implements AgentClient {
     _options?: AgentCreateSessionOptions,
   ): Promise<AgentSession> {
     this.assertConfig(config);
+    await assertExactMcpPreapproval(config, this.permissionSettingsPath);
     const launch = await this.resolveLaunch();
     const modeId = config.modeId ?? ANTIGRAVITY_FULL_ACCESS_MODE_ID;
     const profile = await materializeProfile(config, modeId, this.temporaryRoot);
@@ -895,6 +1006,7 @@ export class AntigravityNativeAgentClient implements AgentClient {
       cwd,
     };
     this.assertConfig(config);
+    await assertExactMcpPreapproval(config, this.permissionSettingsPath);
     const launch = await this.resolveLaunch();
     const modeId = config.modeId ?? ANTIGRAVITY_FULL_ACCESS_MODE_ID;
     const profile = await materializeProfile(config, modeId, this.temporaryRoot);

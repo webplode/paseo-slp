@@ -475,6 +475,119 @@ describe("AgentStorage", () => {
     ]);
   });
 
+  test("persists canonical timeline identity and cursor state across restart", async () => {
+    const agentId = "agent-evidence";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+    await storage.bulkInsert(
+      agentId,
+      [
+        {
+          seq: 1,
+          timestamp: "2026-09-13T00:00:00.000Z",
+          turnId: "turn-1",
+          item: { type: "assistant_message", text: "identical" },
+        },
+        {
+          seq: 2,
+          timestamp: "2026-09-13T00:01:00.000Z",
+          turnId: "turn-2",
+          item: { type: "assistant_message", text: "identical" },
+        },
+      ],
+      { epoch: "epoch-stable", nextSeq: 3 },
+    );
+
+    const before = await storage.fetchCommitted(agentId, { direction: "tail", limit: 0 });
+    const reloaded = new AgentStorage(storagePath, logger);
+    const after = await reloaded.fetchCommitted(agentId, {
+      direction: "after",
+      cursor: { epoch: before.epoch, seq: 1 },
+      limit: 10,
+    });
+
+    expect(after.epoch).toBe(before.epoch);
+    expect(after.epoch).toBe("epoch-stable");
+    expect(after.window.nextSeq).toBe(3);
+    expect(after.rows).toEqual([expect.objectContaining({ seq: 2, turnId: "turn-2" })]);
+  });
+
+  test("fails closed when a legacy record has no passively readable timeline", async () => {
+    const agentId = "agent-legacy-evidence";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+
+    await expect(storage.fetchCommitted(agentId)).rejects.toThrow(
+      "Canonical persisted timeline is unavailable for legacy agent agent-legacy-evidence",
+    );
+  });
+
+  test("replaces persisted rows when the canonical timeline epoch changes", async () => {
+    const agentId = "agent-reset-evidence";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+    await storage.bulkInsert(
+      agentId,
+      [
+        {
+          seq: 1,
+          timestamp: "2026-09-13T00:00:00.000Z",
+          item: { type: "assistant_message", text: "old epoch" },
+        },
+      ],
+      { epoch: "epoch-old", nextSeq: 2 },
+    );
+    await storage.bulkInsert(
+      agentId,
+      [
+        {
+          seq: 1,
+          timestamp: "2026-09-13T00:01:00.000Z",
+          item: { type: "assistant_message", text: "new epoch" },
+        },
+      ],
+      { epoch: "epoch-new", nextSeq: 2 },
+    );
+
+    const page = await storage.fetchCommitted(agentId, { direction: "tail", limit: 0 });
+    expect(page.epoch).toBe("epoch-new");
+    expect(page.rows).toEqual([
+      expect.objectContaining({
+        seq: 1,
+        item: { type: "assistant_message", text: "new epoch" },
+      }),
+    ]);
+  });
+
+  test("persists completed tool updates at their canonical sequence", async () => {
+    const agentId = "agent-tool-update";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+    const running = {
+      seq: 1,
+      timestamp: "2026-09-13T00:00:00.000Z",
+      turnId: "turn-tool",
+      item: {
+        type: "tool_call" as const,
+        callId: "call-1",
+        name: "Read",
+        status: "running" as const,
+        error: null,
+        detail: { type: "unknown" as const, input: { path: "README.md" }, output: null },
+      },
+    };
+    await storage.bulkInsert(agentId, [running]);
+    await storage.updateCommittedRow(agentId, {
+      ...running,
+      item: { ...running.item, status: "completed" as const },
+    });
+
+    const reloaded = new AgentStorage(storagePath, logger);
+    const rows = await reloaded.getCommittedRows(agentId);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        seq: 1,
+        item: expect.objectContaining({ status: "completed" }),
+      }),
+    ]);
+  });
+
   test("internal flag is persisted and reloaded", async () => {
     await storage.applySnapshot(
       createManagedAgent({

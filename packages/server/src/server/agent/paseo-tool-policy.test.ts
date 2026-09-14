@@ -32,4 +32,24 @@ describe("Paseo tool policy", () => {
       isPaseoToolEnabled({ enabled: true, disabledTools: ["list_agents"] }, "create_agent"),
     ).toBe(true);
   });
+
+  test("applies an optional per-agent ceiling before provider exceptions", () => {
+    expect(isPaseoToolEnabled(undefined, "list_agents", undefined)).toBe(true);
+    expect(isPaseoToolEnabled(undefined, "speak", undefined)).toBe(true);
+    expect(isPaseoToolEnabled(undefined, "list_agents", [])).toBe(false);
+    expect(isPaseoToolEnabled(undefined, "speak", [])).toBe(false);
+    expect(
+      isPaseoToolEnabled({ disabledTools: ["create_agent"] }, "create_agent", [
+        "create_agent",
+        "list_agents",
+      ]),
+    ).toBe(false);
+    expect(
+      isPaseoToolEnabled({ disabledTools: ["create_agent"] }, "list_agents", [
+        "create_agent",
+        "list_agents",
+      ]),
+    ).toBe(true);
+    expect(isPaseoToolEnabled(undefined, "new_future_tool", ["list_agents"])).toBe(false);
+  });
 });

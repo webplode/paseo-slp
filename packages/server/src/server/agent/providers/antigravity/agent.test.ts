@@ -30,6 +30,7 @@ for (let index = 0; index < argv.length; index += 1) {
 const profileDir = addDirs[addDirs.length - 1] || null;
 const agent = valueAfter("--agent");
 let profileText = null;
+let mcpConfigText = null;
 if (profileDir && agent) {
   try {
     profileText = fs.readFileSync(
@@ -38,6 +39,11 @@ if (profileDir && agent) {
     );
   } catch (error) {
     profileText = "PROFILE_READ_ERROR:" + error.message;
+  }
+  try {
+    mcpConfigText = fs.readFileSync(path.join(profileDir, ".agents", "mcp_config.json"), "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") mcpConfigText = "MCP_CONFIG_READ_ERROR:" + error.message;
   }
 }
 fs.appendFileSync(
@@ -50,6 +56,7 @@ fs.appendFileSync(
     runtime: process.env.AGY_TEST_RUNTIME || null,
     context: process.env.AGY_TEST_CONTEXT || null,
     profileText,
+    mcpConfigText,
   }) + "\n",
 );
 
@@ -140,6 +147,7 @@ interface FakeInvocation {
   runtime: string | null;
   context: string | null;
   profileText: string | null;
+  mcpConfigText: string | null;
 }
 
 interface FakeCli {
@@ -184,7 +192,10 @@ async function createFakeCli(): Promise<FakeCli> {
   };
 }
 
-function createClient(fake: FakeCli, options?: { terminateProcess?: ProcessTerminator }) {
+function createClient(
+  fake: FakeCli,
+  options?: { terminateProcess?: ProcessTerminator; permissionSettingsPath?: string },
+) {
   return new AntigravityNativeAgentClient({
     logger: createTestLogger(),
     temporaryRoot: join(fake.root, "profiles"),
@@ -199,6 +210,9 @@ function createClient(fake: FakeCli, options?: { terminateProcess?: ProcessTermi
       },
     },
     ...(options?.terminateProcess ? { terminateProcess: options.terminateProcess } : {}),
+    ...(options?.permissionSettingsPath
+      ? { permissionSettingsPath: options.permissionSettingsPath }
+      : {}),
   });
 }
 
@@ -296,6 +310,154 @@ describe("Antigravity native provider", () => {
     ]);
     expect(turns.every((invocation) => invocation.profileText?.includes(instructions))).toBe(true);
     expect(turns[0]?.argv).toContain("--agent");
+  });
+
+  test("projects HTTP and stdio MCP servers into the native profile across resume", async () => {
+    const fake = await createFakeCli();
+    const client = createClient(fake);
+    const config = sessionConfig(fake.workspace, {
+      systemPrompt: "Use the granted MCP tools.",
+      mcpServers: {
+        paseo: {
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=watcher-1",
+          headers: { Authorization: "Bearer test-token" },
+        },
+        local: {
+          type: "stdio",
+          command: "node",
+          args: ["server.mjs"],
+          env: { TEST_SCOPE: "watcher" },
+        },
+      },
+    });
+    const session = await client.createSession(config);
+
+    let handle: AgentPersistenceHandle | null = null;
+    try {
+      await session.run("first");
+      handle = session.describePersistence();
+    } finally {
+      await session.close();
+    }
+
+    const resumed = await client.resumeSession(handle!);
+    try {
+      await resumed.run("second");
+    } finally {
+      await resumed.close();
+    }
+
+    expect(client.capabilities.supportsMcpServers).toBe(true);
+    const turns = (await fake.readInvocations()).filter((invocation) =>
+      invocation.argv.includes("--print"),
+    );
+    expect(turns).toHaveLength(2);
+    for (const turn of turns) {
+      expect(turn.profileText).toContain("inheritCustomizations: false");
+      expect(turn.profileText).not.toContain("mcpServers:");
+      expect(JSON.parse(turn.mcpConfigText ?? "null")).toEqual({
+        mcpServers: {
+          paseo: {
+            serverUrl: "http://127.0.0.1:6767/mcp/agents?callerAgentId=watcher-1",
+            headers: { Authorization: "Bearer test-token" },
+          },
+          local: {
+            command: "node",
+            args: ["server.mjs"],
+            env: { TEST_SCOPE: "watcher" },
+          },
+        },
+      });
+    }
+  });
+
+  test("accepts only exact preapproved MCP grants present in Antigravity permissions", async () => {
+    const fake = await createFakeCli();
+    const settingsPath = join(fake.root, "settings.json");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({ permissions: { allow: ["mcp(paseo/list_agents)"] } }),
+      "utf8",
+    );
+    const session = await createClient(fake, {
+      permissionSettingsPath: settingsPath,
+    }).createSession(
+      sessionConfig(fake.workspace, {
+        modeId: "plan",
+        mcpServers: {
+          paseo: { type: "http", url: "http://127.0.0.1:6781/mcp/agents" },
+        },
+        toolPolicy: {
+          preapproved: [{ kind: "mcp", server: "paseo", tool: "list_agents" }],
+        },
+      }),
+    );
+
+    try {
+      await expect(session.run("inspect")).resolves.toMatchObject({ finalText: "ok" });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each([
+    [{ permissions: { allow: [] } }, "missing permissions.allow entries"],
+    [
+      {
+        permissions: {
+          allow: ["mcp(paseo/list_agents)"],
+          ask: ["mcp(paseo/*)"],
+        },
+      },
+      "permissions.ask/deny entries take precedence",
+    ],
+  ])("rejects an unqualified Antigravity exact MCP policy", async (settings, message) => {
+    const fake = await createFakeCli();
+    const settingsPath = join(fake.root, "settings.json");
+    await writeFile(settingsPath, JSON.stringify(settings), "utf8");
+
+    await expect(
+      createClient(fake, { permissionSettingsPath: settingsPath }).createSession(
+        sessionConfig(fake.workspace, {
+          modeId: "plan",
+          mcpServers: {
+            paseo: { type: "http", url: "http://127.0.0.1:6781/mcp/agents" },
+          },
+          toolPolicy: {
+            preapproved: [{ kind: "mcp", server: "paseo", tool: "list_agents" }],
+          },
+        }),
+      ),
+    ).rejects.toThrow(message);
+  });
+
+  test("removes Antigravity write and command tools from plan-mode profiles", async () => {
+    const fake = await createFakeCli();
+    const session = await createClient(fake).createSession(
+      sessionConfig(fake.workspace, {
+        modeId: "plan",
+        systemPrompt: "Observe only.",
+        mcpServers: {
+          paseo: { type: "http", url: "http://127.0.0.1:6781/mcp/agents" },
+        },
+      }),
+    );
+
+    try {
+      await session.run("inspect");
+    } finally {
+      await session.close();
+    }
+
+    const turn = (await fake.readInvocations()).find((invocation) =>
+      invocation.argv.includes("--print"),
+    );
+    expect(turn?.argv).toContain("plan");
+    expect(turn?.profileText).toContain("  - view_file");
+    expect(turn?.profileText).toContain("  - grep_search");
+    expect(turn?.profileText).not.toContain("  - run_command");
+    expect(turn?.profileText).not.toContain("  - replace_file_content");
   });
 
   test("treats step update text as deltas and does not duplicate the final response", async () => {

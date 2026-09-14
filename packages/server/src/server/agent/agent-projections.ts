@@ -338,6 +338,9 @@ function buildSerializableConfig(config: AgentSessionConfig): SerializableAgentC
   if (config.mcpServers) {
     serializable.mcpServers = config.mcpServers;
   }
+  if (config.paseoToolAllowlist !== undefined) {
+    serializable.paseoToolAllowlist = [...config.paseoToolAllowlist];
+  }
   return Object.keys(serializable).length ? serializable : null;
 }
 

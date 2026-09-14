@@ -924,6 +924,7 @@ export async function createPaseoDaemon(
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
+    durableTimelineStore: agentStorage,
     appendSystemPrompt: config.appendSystemPrompt,
     onWorkspaceStateMayHaveChanged: ({ cwd }) => {
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
@@ -1415,6 +1416,11 @@ export async function createPaseoDaemon(
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
+    paseoToolAllowlist:
+      runtime.paseoToolAllowlist ??
+      (runtime.callerAgentId
+        ? agentManager.getPaseoToolAllowlist(runtime.callerAgentId)
+        : undefined),
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     callerAgentId: runtime.callerAgentId,
@@ -1444,6 +1450,9 @@ export async function createPaseoDaemon(
           callerAgentId,
           paseoToolPolicy: callerAgentId
             ? agentManager.getPaseoToolPolicy(callerAgentId)
+            : undefined,
+          paseoToolAllowlist: callerAgentId
+            ? agentManager.getPaseoToolAllowlist(callerAgentId)
             : undefined,
         }),
       );

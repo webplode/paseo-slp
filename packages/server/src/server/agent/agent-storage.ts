@@ -1,14 +1,27 @@
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Logger } from "pino";
 
 import { writeJsonFileAtomic } from "../atomic-file.js";
-import { AgentFeatureSchema, AgentStatusSchema } from "../messages.js";
+import {
+  AgentFeatureSchema,
+  AgentStatusSchema,
+  AgentTimelineItemPayloadSchema,
+} from "../messages.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
+import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
+import type {
+  AgentTimelineFetchOptions,
+  AgentTimelineFetchResult,
+  AgentTimelineRow,
+  AgentTimelineStore,
+} from "./agent-timeline-store-types.js";
+import type { AgentTimelineItem } from "./agent-sdk-types.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -28,6 +41,7 @@ const SERIALIZABLE_CONFIG_SCHEMA = z
       .optional(),
     systemPrompt: z.string().nullable().optional(),
     mcpServers: z.record(z.string(), z.any()).nullable().optional(),
+    paseoToolAllowlist: z.array(z.string()).nullable().optional(),
   })
   .nullable()
   .optional();
@@ -41,6 +55,20 @@ const PERSISTENCE_HANDLE_SCHEMA = z
   })
   .nullable()
   .optional();
+
+const STORED_TIMELINE_ROW_SCHEMA = z.object({
+  seq: z.number().int().positive(),
+  timestamp: z.string(),
+  item: AgentTimelineItemPayloadSchema,
+  turnId: z.string().optional(),
+  providerMessageId: z.string().optional(),
+});
+
+const STORED_TIMELINE_SCHEMA = z.object({
+  epoch: z.string(),
+  nextSeq: z.number().int().positive(),
+  rows: z.array(STORED_TIMELINE_ROW_SCHEMA),
+});
 
 const STORED_AGENT_SCHEMA = z.object({
   id: z.string(),
@@ -75,6 +103,7 @@ const STORED_AGENT_SCHEMA = z.object({
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
   owner: AgentOwnerSchema.optional(),
+  timeline: STORED_TIMELINE_SCHEMA.optional(),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -87,6 +116,7 @@ export type SerializableAgentConfig = Pick<
   | "toolPolicy"
   | "systemPrompt"
   | "mcpServers"
+  | "paseoToolAllowlist"
 >;
 
 export type StoredAgentRecord = z.infer<typeof STORED_AGENT_SCHEMA>;
@@ -94,7 +124,7 @@ export function parseStoredAgentRecord(value: unknown): StoredAgentRecord {
   return STORED_AGENT_SCHEMA.parse(value);
 }
 
-export class AgentStorage {
+export class AgentStorage implements AgentTimelineStore {
   private cache: Map<string, StoredAgentRecord> = new Map();
   private pathById: Map<string, string> = new Map();
   private pathsById: Map<string, Set<string>> = new Map();
@@ -156,7 +186,12 @@ export class AgentStorage {
   }
 
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
-    return this.queueRecordMutation(record.id, () => record);
+    return this.queueRecordMutation(record.id, (existing) => ({
+      ...record,
+      ...(record.timeline === undefined && existing?.timeline
+        ? { timeline: existing.timeline }
+        : {}),
+    }));
   }
 
   private queueRecordMutation(
@@ -259,8 +294,148 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
+      if (existing?.timeline) {
+        record.timeline = existing.timeline;
+      }
       return record;
     });
+  }
+
+  async appendCommitted(
+    agentId: string,
+    item: AgentTimelineItem,
+    options?: { timestamp?: string; turnId?: string },
+  ): Promise<AgentTimelineRow> {
+    let appended: AgentTimelineRow | null = null;
+    await this.load();
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) throw new Error(`Agent ${agentId} not found`);
+      const store = this.timelineStoreFromRecord(existing);
+      appended = store.append(agentId, item, options);
+      return { ...existing, timeline: this.timelineFromStore(store, agentId) };
+    });
+    if (!appended) throw new Error(`Failed to append timeline row for agent ${agentId}`);
+    return appended;
+  }
+
+  async fetchCommitted(
+    agentId: string,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<AgentTimelineFetchResult> {
+    await this.load();
+    await this.waitForPendingWrite(agentId);
+    const record = this.cache.get(agentId);
+    if (!record) throw new Error(`Agent ${agentId} not found`);
+    if (!record.timeline) {
+      throw new Error(
+        `Canonical persisted timeline is unavailable for legacy agent ${agentId}; passive observation cannot load provider history`,
+      );
+    }
+    return this.timelineStoreFromRecord(record).fetch(agentId, options);
+  }
+
+  async getLatestCommittedSeq(agentId: string): Promise<number> {
+    const rows = await this.getCommittedRows(agentId);
+    return rows.at(-1)?.seq ?? 0;
+  }
+
+  async getCommittedRows(agentId: string): Promise<AgentTimelineRow[]> {
+    const result = await this.fetchCommitted(agentId, { direction: "tail", limit: 0 });
+    return result.rows;
+  }
+
+  async getLastItem(agentId: string): Promise<AgentTimelineItem | null> {
+    const result = await this.fetchCommitted(agentId, { direction: "tail", limit: 1 });
+    return result.rows.at(-1)?.item ?? null;
+  }
+
+  async getLastAssistantMessage(agentId: string): Promise<string | null> {
+    await this.load();
+    await this.waitForPendingWrite(agentId);
+    const record = this.cache.get(agentId);
+    if (!record) throw new Error(`Agent ${agentId} not found`);
+    return this.timelineStoreFromRecord(record).getLastAssistantMessage(agentId);
+  }
+
+  async deleteAgent(agentId: string): Promise<void> {
+    await this.load();
+    const existing = this.cache.get(agentId);
+    if (!existing || !existing.timeline) return;
+    await this.queueRecordMutation(agentId, (record) => {
+      if (!record) throw new Error(`Agent ${agentId} not found`);
+      const { timeline: _timeline, ...withoutTimeline } = record;
+      return withoutTimeline;
+    });
+  }
+
+  async bulkInsert(
+    agentId: string,
+    rows: readonly AgentTimelineRow[],
+    options?: { epoch?: string; nextSeq?: number },
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    await this.load();
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) throw new Error(`Agent ${agentId} not found`);
+      const epoch = options?.epoch ?? existing.timeline?.epoch ?? randomUUID();
+      const sameEpoch = existing.timeline?.epoch === epoch;
+      const bySeq = new Map(
+        (sameEpoch ? (existing.timeline?.rows ?? []) : []).map((row) => [row.seq, row]),
+      );
+      for (const row of rows) bySeq.set(row.seq, { ...row });
+      const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+      return {
+        ...existing,
+        timeline: {
+          epoch,
+          nextSeq: Math.max(
+            sameEpoch ? (existing.timeline?.nextSeq ?? 1) : 1,
+            options?.nextSeq ?? 1,
+            (merged.at(-1)?.seq ?? 0) + 1,
+          ),
+          rows: merged,
+        },
+      };
+    });
+  }
+
+  async updateCommittedRow(agentId: string, row: AgentTimelineRow): Promise<void> {
+    await this.load();
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) throw new Error(`Agent ${agentId} not found`);
+      const timeline = existing.timeline;
+      if (!timeline || !timeline.rows.some((candidate) => candidate.seq === row.seq)) {
+        throw new Error(`Timeline row ${row.seq} for agent ${agentId} not found`);
+      }
+      return {
+        ...existing,
+        timeline: {
+          ...timeline,
+          rows: timeline.rows.map((candidate) => (candidate.seq === row.seq ? row : candidate)),
+        },
+      };
+    });
+  }
+
+  private timelineStoreFromRecord(record: StoredAgentRecord): InMemoryAgentTimelineStore {
+    if (!record.timeline) {
+      throw new Error(`Canonical persisted timeline is unavailable for agent ${record.id}`);
+    }
+    const store = new InMemoryAgentTimelineStore();
+    store.initialize(record.id, {
+      epoch: record.timeline.epoch,
+      nextSeq: record.timeline.nextSeq,
+      rows: record.timeline.rows,
+    });
+    return store;
+  }
+
+  private timelineFromStore(
+    store: InMemoryAgentTimelineStore,
+    agentId: string,
+  ): NonNullable<StoredAgentRecord["timeline"]> {
+    const result = store.fetch(agentId, { direction: "tail", limit: 0 });
+    return { epoch: result.epoch, nextSeq: result.window.nextSeq, rows: result.rows };
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {

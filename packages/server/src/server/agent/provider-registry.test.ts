@@ -651,36 +651,6 @@ test("new provider extending claude appears in registry", () => {
   expect(registry.zai.createClient(logger).provider).toBe("zai");
 });
 
-test("provider aliases compose prompts and retain their configured mode default", async () => {
-  const registry = buildProviderRegistry(logger, {
-    providerOverrides: {
-      codex: {
-        systemPrompt: "Base instructions.",
-      },
-      "codex-role": {
-        extends: "codex",
-        label: "Codex Role",
-        systemPrompt: "Role instructions.",
-        defaultModeId: "full-access",
-      },
-    },
-  });
-
-  expect(registry["codex-role"]).toMatchObject({
-    systemPrompt: "Base instructions.\n\nRole instructions.",
-    configuredDefaultModeId: "full-access",
-    defaultModeId: "full-access",
-  });
-
-  const catalog = await registry["codex-role"].fetchCatalog({
-    scope: "workspace",
-    cwd: "/tmp/catalog",
-    force: false,
-  });
-
-  expect(catalog.defaultModeId).toBe("full-access");
-});
-
 test("built-in OMP override keeps the real OMP adapter enabled and launchable", async () => {
   const omp = new FakeOmp(["custom-omp"]);
   const registry = buildProviderRegistry(logger, {

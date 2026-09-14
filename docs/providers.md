@@ -32,6 +32,12 @@ This Paseo version accepts these keys:
   `repo_clone`, `repo_overview`, `lsp`, `doom_loop`, and `skill`. See the
   [OpenCode permissions reference](https://opencode.ai/docs/permissions/). OpenCode permissions are
   application policy, not an OS sandbox.
+- **Antigravity:** no session `providerOptions` are exposed. A session that requests exact MCP
+  preapproval is admitted only when the provider's existing
+  `~/.gemini/antigravity-cli/settings.json` contains each exact `mcp(server/tool)` entry in
+  `permissions.allow`, with no matching `permissions.ask` or `permissions.deny` entry. Missing,
+  unreadable or shadowed rules fail before provider startup. Paseo does not rewrite this global
+  provider configuration and does not accept a wildcard allow as evidence of an exact grant.
 
 Each provider definition owns its option schema and exact MCP preapproval mapping. A new provider
 must fail closed for Hub unattended execution until it can approve one exact injected MCP server

@@ -691,6 +691,19 @@ process.stdin.on("data", (chunk) => {
 }
 
 describe("Codex app-server provider", () => {
+  test("getAvailableModes advertises the existing read-only sandbox mode", async () => {
+    const session = createSession({}, { autoReviewEnabled: false });
+
+    await expect(session.getAvailableModes()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "read-only",
+          label: "Read Only",
+        }),
+      ]),
+    );
+  });
+
   test("getAvailableModes includes auto-review when the Codex version supports it", async () => {
     const session = createSession({}, { autoReviewEnabled: true });
 

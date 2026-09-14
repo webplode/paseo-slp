@@ -274,16 +274,12 @@ describe("ProviderOverrideSchema", () => {
       env: {
         FOO: "bar",
       },
-      systemPrompt: "Role instructions.",
-      defaultModeId: "full-access",
       enabled: false,
       order: 2,
     });
 
     expect(parsed.command).toEqual(["custom-claude", "--json"]);
     expect(parsed.env?.FOO).toBe("bar");
-    expect(parsed.systemPrompt).toBe("Role instructions.");
-    expect(parsed.defaultModeId).toBe("full-access");
     expect(parsed.enabled).toBe(false);
     expect(parsed.order).toBe(2);
   });

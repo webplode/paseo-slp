@@ -52,10 +52,6 @@ export const ProviderOverrideSchema = z.object({
   extends: z.string().optional(),
   label: z.string().optional(),
   description: z.string().optional(),
-  /** Instruction text applied to new sessions for this provider alias. */
-  systemPrompt: z.string().optional(),
-  /** Mode selected when a new session does not provide one explicitly. */
-  defaultModeId: z.string().min(1).optional(),
   command: z.array(z.string().min(1)).min(1).optional(),
   env: z.record(z.string(), z.string()).optional(),
   params: z.record(z.string(), z.unknown()).optional(),

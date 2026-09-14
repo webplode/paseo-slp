@@ -355,6 +355,7 @@ function requiresDedicatedOpenCodeServer(
   launchContext?: AgentLaunchContext,
 ): boolean {
   if (config.mcpServers && Object.keys(config.mcpServers).length > 0) return true;
+  if (config.paseoToolAllowlist !== undefined && launchContext?.agentId) return true;
   return Object.keys(launchContext?.env ?? {}).some((key) => !OPENCODE_SESSION_ENV_KEYS.has(key));
 }
 type OpenCodeMessageRole = "user" | "assistant";
@@ -1442,14 +1443,16 @@ export class OpenCodeAgentClient implements AgentClient {
     options?: AgentCreateSessionOptions,
   ): Promise<AgentSession> {
     const openCodeConfig = this.assertConfig(config);
-    const acquisition = await this.acquireServer(openCodeConfig, launchContext);
-    const { url } = acquisition.server;
-    const client = this.createOpenCodeClient({
-      baseUrl: url,
-      directory: openCodeConfig.cwd,
-    });
+    const releaseScopedManifest = this.registerScopedManifestCatalog(openCodeConfig, launchContext);
+    let acquisition: OpenCodeServerAcquisition | undefined;
 
     try {
+      acquisition = await this.acquireServer(openCodeConfig, launchContext);
+      const { url } = acquisition.server;
+      const client = this.createOpenCodeClient({
+        baseUrl: url,
+        directory: openCodeConfig.cwd,
+      });
       // Creating the first session for a directory is part of OpenCode coming up, so it
       // shares the server startup budget instead of a shorter one that fails agent
       // creation on contended cold starts.
@@ -1471,7 +1474,7 @@ export class OpenCodeAgentClient implements AgentClient {
       }
 
       await this.populateModelContextWindowCache(client, openCodeConfig.cwd);
-      const unbindBridge = this.bindBridgeSession(session.id, launchContext);
+      const unbindBridge = this.bindBridgeSession(session.id, launchContext, releaseScopedManifest);
 
       return new OpenCodeAgentSession(
         openCodeConfig,
@@ -1488,7 +1491,8 @@ export class OpenCodeAgentClient implements AgentClient {
         unbindBridge,
       );
     } catch (error) {
-      await acquisition.release();
+      releaseScopedManifest?.();
+      await acquisition?.release();
       throw error;
     }
   }
@@ -1511,21 +1515,27 @@ export class OpenCodeAgentClient implements AgentClient {
       cwd,
     };
     const openCodeConfig = this.assertConfig(config);
+    const releaseScopedManifest = this.registerScopedManifestCatalog(openCodeConfig, launchContext);
     const registeredServerUrl = getOpenCodeChildSessionServerUrl(handle.sessionId);
     const registeredAcquisition = registeredServerUrl
       ? this.serverManager.acquireExisting(registeredServerUrl)
       : null;
-    const acquisition =
-      registeredAcquisition ?? (await this.acquireServer(openCodeConfig, launchContext));
-    const { url } = acquisition.server;
-    const client = this.createOpenCodeClient({
-      baseUrl: url,
-      directory: openCodeConfig.cwd,
-    });
+    let acquisition: OpenCodeServerAcquisition | undefined;
 
     try {
+      acquisition =
+        registeredAcquisition ?? (await this.acquireServer(openCodeConfig, launchContext));
+      const { url } = acquisition.server;
+      const client = this.createOpenCodeClient({
+        baseUrl: url,
+        directory: openCodeConfig.cwd,
+      });
       await this.populateModelContextWindowCache(client, openCodeConfig.cwd);
-      const unbindBridge = this.bindBridgeSession(handle.sessionId, launchContext);
+      const unbindBridge = this.bindBridgeSession(
+        handle.sessionId,
+        launchContext,
+        releaseScopedManifest,
+      );
 
       return new OpenCodeAgentSession(
         openCodeConfig,
@@ -1542,7 +1552,8 @@ export class OpenCodeAgentClient implements AgentClient {
         unbindBridge,
       );
     } catch (error) {
-      await acquisition.release();
+      releaseScopedManifest?.();
+      await acquisition?.release();
       throw error;
     }
   }
@@ -1551,7 +1562,11 @@ export class OpenCodeAgentClient implements AgentClient {
     config: OpenCodeAgentConfig,
     launchContext?: AgentLaunchContext,
   ): Promise<OpenCodeServerAcquisition> {
-    if (!this.bridge || requiresDedicatedOpenCodeServer(config, launchContext)) {
+    const dedicated = requiresDedicatedOpenCodeServer(config, launchContext);
+    if (this.bridge && dedicated && !launchContext?.env) {
+      throw new Error("OpenCode scoped Paseo tools require a launch environment");
+    }
+    if (!this.bridge || dedicated) {
       return launchContext?.env
         ? this.serverManager.acquireDedicated(launchContext.env)
         : this.serverManager.acquireCurrent();
@@ -1562,13 +1577,31 @@ export class OpenCodeAgentClient implements AgentClient {
   private bindBridgeSession(
     sessionId: string,
     launchContext?: AgentLaunchContext,
+    releaseScopedManifest?: () => void,
   ): (() => void) | undefined {
     if (!this.bridge || !launchContext) return undefined;
-    return this.bridge.bindSession({
+    const unbind = this.bridge.bindSession({
       sessionId,
       env: launchContext.env ?? {},
       tools: launchContext.paseoTools,
     });
+    return () => {
+      unbind();
+      releaseScopedManifest?.();
+    };
+  }
+
+  private registerScopedManifestCatalog(
+    config: OpenCodeAgentConfig,
+    launchContext?: AgentLaunchContext,
+  ): (() => void) | undefined {
+    if (config.paseoToolAllowlist === undefined || !this.bridge || !launchContext?.agentId) {
+      return undefined;
+    }
+    return this.bridge.setManifestCatalogForAgent(
+      launchContext.agentId,
+      launchContext.paseoTools ?? null,
+    );
   }
 
   async fetchCatalog(

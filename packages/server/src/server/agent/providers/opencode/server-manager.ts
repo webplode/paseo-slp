@@ -328,9 +328,10 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       (typeof this.baseEnv?.OPENCODE_CONFIG_CONTENT === "string"
         ? this.baseEnv.OPENCODE_CONFIG_CONTENT
         : process.env.OPENCODE_CONFIG_CONTENT);
-    const bridgeEnv = this.decorateServerEnv?.(
-      existingConfigContent ? { OPENCODE_CONFIG_CONTENT: existingConfigContent } : {},
-    );
+    const bridgeEnv = this.decorateServerEnv?.({
+      ...(launchEnv?.PASEO_AGENT_ID ? { PASEO_AGENT_ID: launchEnv.PASEO_AGENT_ID } : {}),
+      ...(existingConfigContent ? { OPENCODE_CONFIG_CONTENT: existingConfigContent } : {}),
+    });
     const serverProcess = this.spawnServerProcess(launchPrefix.command, serverArgs, {
       cwd: serverCwd,
       detached: process.platform !== "win32",

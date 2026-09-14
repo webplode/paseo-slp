@@ -219,6 +219,7 @@ export interface PaseoAgentConfig {
   systemPrompt?: PaseoAgentSessionConfig["systemPrompt"];
   toolPolicy?: PaseoAgentSessionConfig["toolPolicy"];
   mcpServers?: PaseoAgentSessionConfig["mcpServers"];
+  paseoToolAllowlist?: PaseoAgentSessionConfig["paseoToolAllowlist"];
 }
 
 export interface PaseoAgentCreateOptions {

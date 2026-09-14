@@ -5,8 +5,16 @@ Agent chat delivery has two paths:
 1. **Live stream** — `agent_stream` WebSocket messages for immediacy. These may be delta-shaped lifecycle updates.
 2. **Authoritative history** — `fetch_agent_timeline_request` for correctness. This always returns full projected timeline items, never lifecycle deltas.
 
-The daemon keeps canonical rows only for its runtime. Provider history is the durable transcript
-authority and repopulates those rows when an agent resumes.
+The daemon persists canonical rows, epoch and next sequence beside the native agent record.
+Provider history remains the recovery source for legacy records without persisted rows. A normal
+resume restores the exact persisted rows and epoch before accepting new events; it does not collapse
+identical attempts or lose completed tool updates.
+
+`get_agent_activity` is the passive evidence-reader boundary. It reads that persisted canonical
+store directly and never calls provider load/resume. Its canonical pages carry stable
+`agent:epoch:sequence` references plus continuation, reset, stale-cursor, gap, truncation and read
+error state. This is intentionally distinct from interactive UI history recovery, which may load a
+legacy provider transcript when no canonical rows exist.
 
 The invariants are:
 
