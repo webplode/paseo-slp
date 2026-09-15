@@ -33,6 +33,7 @@ interface BindOpenCodeSessionInput extends OpenCodeSessionBinding {
 interface OpenCodePluginOptions {
   baseUrl: string;
   token: string;
+  manifestKey?: string;
 }
 
 interface OpenCodeConfig {
@@ -45,6 +46,7 @@ export class OpenCodeBridge {
   private readonly logger: Logger;
   private readonly token = randomBytes(32).toString("hex");
   private readonly sessions = new Map<string, OpenCodeSessionBinding>();
+  private readonly manifestCatalogsByAgent = new Map<string, PaseoToolCatalog | null>();
   private server: Server | null = null;
   private baseUrl: string | null = null;
   private pluginUrl: string | null = null;
@@ -81,6 +83,15 @@ export class OpenCodeBridge {
     this.manifestCatalog = catalog;
   }
 
+  setManifestCatalogForAgent(agentId: string, catalog: PaseoToolCatalog | null): () => void {
+    this.manifestCatalogsByAgent.set(agentId, catalog);
+    return () => {
+      if (this.manifestCatalogsByAgent.get(agentId) === catalog) {
+        this.manifestCatalogsByAgent.delete(agentId);
+      }
+    };
+  }
+
   bindSession(input: BindOpenCodeSessionInput): () => void {
     const binding: OpenCodeSessionBinding = {
       env: { ...input.env },
@@ -96,9 +107,14 @@ export class OpenCodeBridge {
 
   decorateServerEnv(env: Record<string, string>): Record<string, string> {
     const pluginUrl = this.requirePluginUrl();
+    const manifestKey =
+      env.PASEO_AGENT_ID && this.manifestCatalogsByAgent.has(env.PASEO_AGENT_ID)
+        ? env.PASEO_AGENT_ID
+        : undefined;
     const options: OpenCodePluginOptions = {
       baseUrl: this.requireBaseUrl(),
       token: this.token,
+      ...(manifestKey ? { manifestKey } : {}),
     };
     const config = parseOpenCodeConfig(env.OPENCODE_CONFIG_CONTENT);
     const plugins = config.plugin ?? [];
@@ -120,6 +136,7 @@ export class OpenCodeBridge {
     this.server = null;
     this.baseUrl = null;
     this.sessions.clear();
+    this.manifestCatalogsByAgent.clear();
     if (server) await closeServer(server);
   }
 
@@ -139,7 +156,9 @@ export class OpenCodeBridge {
       }
       const url = new URL(request.url ?? "/", this.requireBaseUrl());
       if (request.method === "GET" && url.pathname === `${INTERNAL_PREFIX}/tools`) {
-        sendJson(response, 200, { tools: this.serializeManifest() });
+        sendJson(response, 200, {
+          tools: this.serializeManifest(url.searchParams.get("manifestKey")),
+        });
         return;
       }
 
@@ -180,8 +199,11 @@ export class OpenCodeBridge {
     }
   }
 
-  private serializeManifest(): Array<Record<string, unknown>> {
-    const catalog = this.manifestCatalog;
+  private serializeManifest(manifestKey: string | null): Array<Record<string, unknown>> {
+    const catalog =
+      manifestKey === null
+        ? this.manifestCatalog
+        : (this.manifestCatalogsByAgent.get(manifestKey) ?? null);
     if (!catalog) return [];
     return [...catalog.tools.values()].map((tool) => {
       const definition: Record<string, unknown> = {
@@ -207,6 +229,10 @@ export class OpenCodeBridge {
     }
     if (!binding.tools) {
       sendJson(input.response, 403, { error: "Paseo tools are disabled for this session" });
+      return;
+    }
+    if (!binding.tools.getTool(input.toolName)) {
+      sendJson(input.response, 404, { error: `Paseo tool not found: ${input.toolName}` });
       return;
     }
     const body = await readJsonBody(input.request);

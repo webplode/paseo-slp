@@ -5,12 +5,35 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
+import type { PaseoToolCatalog, PaseoToolDefinition } from "../tools/types.js";
 import { OpenCodeAgentClient } from "./opencode-agent.js";
 import { OpenCodeBridge } from "./opencode/bridge.js";
 import {
   TestOpenCodeClient,
   TestOpenCodeHarness,
 } from "./opencode/test-utils/test-opencode-harness.js";
+
+function createGlobalCatalog(): PaseoToolCatalog {
+  const tool: PaseoToolDefinition = {
+    name: "global_only",
+    description: "A tool that should not cross the scoped manifest boundary.",
+    async handler() {
+      return { content: [{ type: "text", text: "global" }] };
+    },
+  };
+  const tools = new Map([[tool.name, tool]]);
+  return {
+    tools,
+    getTool(name) {
+      return tools.get(name);
+    },
+    async executeTool(name, input, context) {
+      const definition = tools.get(name);
+      if (!definition) throw new Error(`Unknown tool: ${name}`);
+      return await definition.handler(input, context ?? {});
+    },
+  };
+}
 
 describe("OpenCode bridge adapter", () => {
   const cleanups: Array<() => Promise<void>> = [];
@@ -104,6 +127,51 @@ describe("OpenCode bridge adapter", () => {
     expect(runtime.acquisitions.map(({ kind }) => kind)).toEqual(["dedicated", "dedicated"]);
     await customEnv.close();
     await customMcp.close();
+  });
+
+  test("keeps an explicit scoped manifest empty when native tools are policy-disabled", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-opencode-adapter-"));
+    const bridge = new OpenCodeBridge({ paseoHome, logger: createTestLogger() });
+    await bridge.start();
+    cleanups.push(async () => {
+      await bridge.close();
+      await rm(paseoHome, { recursive: true, force: true });
+    });
+    bridge.setManifestCatalog(createGlobalCatalog());
+
+    const runtime = new TestOpenCodeHarness();
+    runtime.enqueueClient(new TestOpenCodeClient());
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+      bridge,
+    });
+    const session = await client.createSession(
+      { provider: "opencode", cwd: "/workspace/empty", paseoToolAllowlist: [] },
+      {
+        agentId: "agent-empty",
+        env: { PASEO_AGENT_ID: "agent-empty", PASEO_AGENT_CWD: "/workspace/empty" },
+      },
+    );
+
+    try {
+      expect(runtime.acquisitions.map(({ kind }) => kind)).toEqual(["dedicated"]);
+      const decorated = bridge.decorateServerEnv({ PASEO_AGENT_ID: "agent-empty" });
+      const config = JSON.parse(decorated.OPENCODE_CONFIG_CONTENT) as {
+        plugin: Array<[string, { baseUrl: string; token: string; manifestKey?: string }]>;
+      };
+      const [, options] = config.plugin[0];
+      expect(options.manifestKey).toBe("agent-empty");
+      const manifestKey = options.manifestKey;
+      if (!manifestKey) throw new Error("Expected a scoped OpenCode manifest key");
+      const response = await fetch(
+        new URL(`/_internal/opencode/tools?manifestKey=${manifestKey}`, options.baseUrl),
+        { headers: { Authorization: `Bearer ${options.token}` } },
+      );
+      expect(await response.json()).toEqual({ tools: [] });
+    } finally {
+      await session.close();
+    }
   });
 });
 

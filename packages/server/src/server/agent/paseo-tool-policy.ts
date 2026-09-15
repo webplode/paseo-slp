@@ -14,7 +14,11 @@ export function resolvePaseoToolPolicy(
 export function isPaseoToolEnabled(
   policy: ProviderPaseoToolsPolicy | undefined,
   toolName: string,
+  paseoToolAllowlist?: readonly string[],
 ): boolean {
+  if (paseoToolAllowlist !== undefined && !paseoToolAllowlist.includes(toolName)) {
+    return false;
+  }
   if (toolName === "speak") {
     return true;
   }

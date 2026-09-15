@@ -22,7 +22,11 @@ export default async function paseoPlugin(input, options) {
 
   let manifest;
   try {
-    manifest = await request(`${INTERNAL_PREFIX}/tools`);
+    const manifestKey =
+      typeof options.manifestKey === "string" && options.manifestKey.length > 0
+        ? `?manifestKey=${encodeURIComponent(options.manifestKey)}`
+        : "";
+    manifest = await request(`${INTERNAL_PREFIX}/tools${manifestKey}`);
   } catch (error) {
     logPluginError("manifest", {}, error);
     throw error;

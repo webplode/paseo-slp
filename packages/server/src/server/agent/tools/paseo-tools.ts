@@ -8,6 +8,7 @@ import { AgentProfileSchema } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../../daemon-config-store.js";
 import {
   AgentFeatureSchema,
+  AgentTimelineItemPayloadSchema,
   AgentPermissionRequestPayloadSchema,
   AgentListItemPayloadSchema,
   AgentPermissionResponseSchema,
@@ -21,9 +22,7 @@ import {
   toAgentPayload,
 } from "../agent-projections.js";
 import { curateAgentActivity } from "../activity-curator.js";
-import { selectItemsByProjectedLimit } from "../timeline-projection.js";
 import type { AgentStorage } from "../agent-storage.js";
-import { ensureAgentLoaded } from "../agent-loading.js";
 import { isStoredAgentProviderAvailable } from "../../persistence-hooks.js";
 import {
   archiveByScope,
@@ -131,6 +130,7 @@ export interface PaseoToolHostDependencies {
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
+  paseoToolAllowlist?: readonly string[];
   paseoHome?: string;
   worktreesRoot?: string;
   /**
@@ -579,7 +579,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Tool handlers are schema-validated at registration boundaries.
     handler: (input: any, context: PaseoToolExecutionContext) => Promise<PaseoToolResult>,
   ) => {
-    if (!isPaseoToolEnabled(options.paseoToolPolicy, name)) {
+    if (!isPaseoToolEnabled(options.paseoToolPolicy, name, options.paseoToolAllowlist)) {
       return;
     }
     tools.set(name, {
@@ -2013,6 +2013,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       inputSchema: {
         includeArchived: z.boolean().optional().default(false),
         cwd: z.string().optional(),
+        workspaceId: z.string().optional(),
         sinceHours: z
           .number()
           .int()
@@ -2027,7 +2028,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         agents: z.array(AgentListItemPayloadSchema),
       },
     },
-    async ({ includeArchived = false, cwd, sinceHours = 48, statuses, limit = 50 }) => {
+    async ({
+      includeArchived = false,
+      cwd,
+      workspaceId,
+      sinceHours = 48,
+      statuses,
+      limit = 50,
+    }) => {
       const callerCwd = callerAgentId ? resolveCallerAgent()?.cwd : undefined;
       const requestedCwd = cwd?.trim() ? expandUserPath(cwd) : callerCwd;
       const statusFilter = statuses && statuses.length > 0 ? new Set(statuses) : null;
@@ -2040,6 +2048,10 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       );
       const liveIds = new Set(liveSnapshots.map((snapshot) => snapshot.id));
       const storedRecords = await agentStorage.list();
+      const workspaceByAgentId = new Map<string, string | undefined>([
+        ...liveSnapshots.map((snapshot) => [snapshot.id, snapshot.workspaceId] as const),
+        ...storedRecords.map((record) => [record.id, record.workspaceId] as const),
+      ]);
       const registeredProviderIds = new Set(providerSnapshotManager.listRegisteredProviderIds());
       const storedAgents = storedRecords
         .filter((record) => !record.internal && !liveIds.has(record.id))
@@ -2051,6 +2063,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         .map((record) => buildStoredAgentPayload(record, registeredProviderIds));
       const agents = [...liveAgents, ...storedAgents]
         .map(toAgentListItemPayload)
+        .filter((agent) => !workspaceId || workspaceByAgentId.get(agent.id) === workspaceId)
         .filter((agent) => !requestedCwd || isSameOrDescendantPath(requestedCwd, agent.cwd))
         .filter((agent) => !statusFilter || statusFilter.has(agent.status))
         .filter((agent) => !agent.archivedAt || resolveAgentListActivityTime(agent) >= sinceMs)
@@ -2582,10 +2595,15 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         name: z.string().optional(),
         maxRuns: z.number().int().positive().optional(),
         expiresIn: z.string().optional(),
+        quiet: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Suppress the successful heartbeat turn's ordinary Human unread notification."),
       },
       outputSchema: ScheduleSummarySchema.shape,
     },
-    async ({ prompt, cron, timezone, name, maxRuns, expiresIn }) => {
+    async ({ prompt, cron, timezone, name, maxRuns, expiresIn, quiet = false }) => {
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2605,6 +2623,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...(name?.trim() ? { name: name.trim() } : {}),
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
+        ...(quiet ? { silentOnSuccess: true } : {}),
       });
 
       return {
@@ -3019,55 +3038,170 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "get_agent_activity",
     {
       title: "Get agent activity",
-      description: "Return recent agent timeline entries as a curated summary.",
+      description:
+        "Passively page canonical persisted agent evidence without loading or resuming the observed provider. Returns stable source references and explicit coverage/cursor state.",
       inputSchema: {
         agentId: z.string(),
+        direction: z.enum(["tail", "before", "after"]).optional().default("tail"),
+        cursor: z.object({ epoch: z.string(), seq: z.number().int().nonnegative() }).optional(),
         limit: z
           .number()
+          .int()
+          .nonnegative()
+          .max(500)
           .optional()
-          .describe("Optional limit for number of activities to include (most recent first)."),
+          .describe("Canonical row limit. Zero selects the complete available window."),
       },
       outputSchema: {
         agentId: z.string(),
         updateCount: z.number(),
         currentModeId: z.string().nullable(),
         content: z.string(),
+        agent: z
+          .object({
+            title: z.string().nullable(),
+            provider: z.string(),
+            workspaceId: z.string().nullable(),
+            role: z.string().nullable(),
+            parentAgentId: z.string().nullable(),
+            status: z.string(),
+            objective: z.string().nullable(),
+          })
+          .nullable(),
+        coverage: z.object({
+          state: z.enum(["complete", "partial", "failed"]),
+          epoch: z.string().nullable(),
+          direction: z.enum(["tail", "before", "after"]),
+          reset: z.boolean(),
+          staleCursor: z.boolean(),
+          gap: z.boolean(),
+          truncated: z.boolean(),
+          hasOlder: z.boolean(),
+          hasNewer: z.boolean(),
+          window: z
+            .object({ minSeq: z.number(), maxSeq: z.number(), nextSeq: z.number() })
+            .nullable(),
+          previousCursor: z
+            .object({ epoch: z.string(), seq: z.number().int().nonnegative() })
+            .nullable(),
+          nextCursor: z
+            .object({ epoch: z.string(), seq: z.number().int().nonnegative() })
+            .nullable(),
+          readError: z.string().nullable(),
+        }),
+        evidence: z.array(
+          z.object({
+            ref: z.string(),
+            seq: z.number(),
+            timestamp: z.string(),
+            turnId: z.string().nullable(),
+            providerMessageId: z.string().nullable(),
+            item: AgentTimelineItemPayloadSchema,
+          }),
+        ),
       },
     },
-    async ({ agentId, limit }) => {
-      await ensureAgentLoaded(agentId, {
-        agentManager,
-        agentStorage,
-        logger: childLogger,
-      });
-      const timeline = agentManager.getTimeline(agentId);
+    // oxlint-disable-next-line complexity
+    async ({ agentId, direction = "tail", cursor, limit }) => {
+      const record = await agentStorage.get(agentId);
+      if (!record || record.internal) throw new Error(`Agent ${agentId} not found`);
       const snapshot = agentManager.getAgent(agentId);
-
-      const selection = selectItemsByProjectedLimit({
-        items: timeline,
-        direction: "tail",
-        limit: limit ?? 0,
-      });
-      const curatedContent = curateAgentActivity(selection.items);
-      const { totalProjected, shownProjected } = selection;
-
-      const noun = totalProjected === 1 ? "activity" : "activities";
-      const countHeader =
-        limit && shownProjected < totalProjected
-          ? `Showing ${shownProjected} of ${totalProjected} ${noun} (limited to ${limit})`
-          : `Showing all ${totalProjected} ${noun}`;
-
-      const contentWithCount = `${countHeader}\n\n${curatedContent}`;
-
-      return {
-        content: [],
-        structuredContent: ensureValidJson({
-          agentId,
-          updateCount: timeline.length,
-          currentModeId: snapshot?.currentModeId ?? null,
-          content: contentWithCount,
-        }),
-      };
+      try {
+        const page = await agentStorage.fetchCommitted(agentId, {
+          direction,
+          ...(cursor ? { cursor } : {}),
+          ...(limit === undefined ? {} : { limit }),
+        });
+        const evidence = page.rows.map((row) => ({
+          ref: `${agentId}:${page.epoch}:${row.seq}`,
+          seq: row.seq,
+          timestamp: row.timestamp,
+          turnId: row.turnId ?? null,
+          providerMessageId: row.providerMessageId ?? null,
+          item: row.item,
+        }));
+        const initialUserItem = record.timeline?.rows.find(
+          (row) => row.item.type === "user_message",
+        )?.item;
+        const objective =
+          initialUserItem?.type === "user_message" ? initialUserItem.text.slice(0, 4_000) : null;
+        const curatedContent = curateAgentActivity(page.rows.map((row) => row.item));
+        const truncated = page.hasOlder || page.hasNewer || page.reset || page.gap;
+        return {
+          content: [],
+          structuredContent: ensureValidJson({
+            agentId,
+            updateCount: page.window.maxSeq,
+            currentModeId: snapshot?.currentModeId ?? record.lastModeId ?? null,
+            content: `Showing ${page.rows.length} canonical evidence rows\n\n${curatedContent}`,
+            agent: {
+              title: record.title ?? null,
+              provider: record.provider,
+              workspaceId: record.workspaceId ?? null,
+              role: record.labels["slp.role"] ?? null,
+              parentAgentId: record.labels["paseo.parent-agent-id"] ?? null,
+              status: snapshot?.lifecycle ?? record.lastStatus,
+              objective,
+            },
+            coverage: {
+              state: truncated ? "partial" : "complete",
+              epoch: page.epoch,
+              direction: page.direction,
+              reset: page.reset,
+              staleCursor: page.staleCursor,
+              gap: page.gap,
+              truncated,
+              hasOlder: page.hasOlder,
+              hasNewer: page.hasNewer,
+              window: page.window,
+              previousCursor:
+                page.hasOlder && page.rows[0] ? { epoch: page.epoch, seq: page.rows[0].seq } : null,
+              nextCursor:
+                page.hasNewer && page.rows.at(-1)
+                  ? { epoch: page.epoch, seq: page.rows.at(-1)!.seq }
+                  : null,
+              readError: null,
+            },
+            evidence,
+          }),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [],
+          structuredContent: ensureValidJson({
+            agentId,
+            updateCount: 0,
+            currentModeId: snapshot?.currentModeId ?? record.lastModeId ?? null,
+            content: `Passive timeline read failed: ${message}`,
+            agent: {
+              title: record.title ?? null,
+              provider: record.provider,
+              workspaceId: record.workspaceId ?? null,
+              role: record.labels["slp.role"] ?? null,
+              parentAgentId: record.labels["paseo.parent-agent-id"] ?? null,
+              status: snapshot?.lifecycle ?? record.lastStatus,
+              objective: null,
+            },
+            coverage: {
+              state: "failed",
+              epoch: null,
+              direction,
+              reset: false,
+              staleCursor: false,
+              gap: false,
+              truncated: false,
+              hasOlder: false,
+              hasNewer: false,
+              window: null,
+              previousCursor: null,
+              nextCursor: null,
+              readError: message,
+            },
+            evidence: [],
+          }),
+        };
+      }
     },
   );
 

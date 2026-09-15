@@ -186,7 +186,12 @@ export interface AgentManagerProviderState {
       AgentProvider,
       Pick<
         ProviderDefinition,
-        "enabled" | "derivedFromProviderId" | "validateOptions" | "applyOptions" | "applyToolPolicy"
+        | "enabled"
+        | "derivedFromProviderId"
+        | "supportsExactMcpPreapproval"
+        | "validateOptions"
+        | "applyOptions"
+        | "applyToolPolicy"
       >
     >
   >;
@@ -368,6 +373,7 @@ export class ProviderSnapshotManager {
       providerDefinitions[provider] = {
         enabled: definition.enabled,
         derivedFromProviderId: definition.derivedFromProviderId,
+        supportsExactMcpPreapproval: definition.supportsExactMcpPreapproval,
         validateOptions: definition.validateOptions,
         applyOptions: definition.applyOptions,
         applyToolPolicy: definition.applyToolPolicy,

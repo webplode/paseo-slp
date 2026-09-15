@@ -214,6 +214,8 @@ export interface AgentRunOptions {
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
   clientMessageId?: string;
+  /** Internal delivery policy: suppress only the successful running-to-idle unread edge. */
+  suppressFinishAttention?: boolean;
 }
 
 export interface AgentSteerOptions extends AgentRunOptions {
@@ -618,6 +620,11 @@ export interface AgentSessionConfig {
   providerOptions?: ProviderOptions;
   toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Optional per-agent ceiling for daemon-provided Paseo tools. Omit this
+   * field to retain the host/provider tool surface; an empty list exposes none.
+   */
+  paseoToolAllowlist?: string[];
   /**
    * Internal agents are hidden from listings and don't trigger notifications.
    * They are used for ephemeral system tasks like commit/PR generation.

@@ -32,6 +32,12 @@ This Paseo version accepts these keys:
   `repo_clone`, `repo_overview`, `lsp`, `doom_loop`, and `skill`. See the
   [OpenCode permissions reference](https://opencode.ai/docs/permissions/). OpenCode permissions are
   application policy, not an OS sandbox.
+- **Antigravity:** no session `providerOptions` are exposed. A session that requests exact MCP
+  preapproval is admitted only when the provider's existing
+  `~/.gemini/antigravity-cli/settings.json` contains each exact `mcp(server/tool)` entry in
+  `permissions.allow`, with no matching `permissions.ask` or `permissions.deny` entry. Missing,
+  unreadable or shadowed rules fail before provider startup. Paseo does not rewrite this global
+  provider configuration and does not accept a wildcard allow as evidence of an exact grant.
 
 Each provider definition owns its option schema and exact MCP preapproval mapping. A new provider
 must fail closed for Hub unattended execution until it can approve one exact injected MCP server
@@ -53,7 +59,7 @@ ACP permission options are rendered as ordered actions and Paseo returns the sel
 
 Implement the `AgentClient` and `AgentSession` interfaces from `agent-sdk-types.ts` yourself. This gives full control but requires you to handle process management, streaming, permissions, and session persistence from scratch.
 
-Existing direct providers: `claude` (in `providers/claude/agent.ts`), `codex` (`codex-app-server-agent.ts`), `opencode` (`opencode-agent.ts`), `pi` (`providers/pi/agent.ts`), and `omp` (`providers/omp/agent.ts`). The dev-only `mock` provider (`mock-load-test-agent.ts`) is also direct.
+Existing direct providers: `claude` (in `providers/claude/agent.ts`), `codex` (`codex-app-server-agent.ts`), `opencode` (`opencode-agent.ts`), `pi` (`providers/pi/agent.ts`), `omp` (`providers/omp/agent.ts`), and `antigravity` (`providers/antigravity/agent.ts`). The dev-only `mock` provider (`mock-load-test-agent.ts`) is also direct.
 
 Claude first-party model metadata lives in `packages/server/src/server/agent/providers/claude/model-manifest.ts`. When adding or updating a Claude model, update that manifest only; the model picker thinking options and Claude-specific feature gates are derived from the manifest. Do not add model-specific Claude capability lists in feature code.
 

@@ -22,6 +22,7 @@ import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type {
   AgentTimelineFetchOptions,
   AgentTimelineFetchResult,
@@ -152,9 +153,15 @@ class RecordingTimelineStore implements AgentTimelineStore {
     this.memory.delete(agentId);
   }
 
-  async bulkInsert(agentId: string, rows: readonly AgentTimelineRow[]): Promise<void> {
+  async bulkInsert(
+    agentId: string,
+    rows: readonly AgentTimelineRow[],
+    options?: { epoch?: string; nextSeq?: number },
+  ): Promise<void> {
     this.writes.push(rows.map((row) => ({ ...row })));
-    this.ensure(agentId);
+    if (!this.memory.has(agentId)) {
+      this.memory.initialize(agentId, options);
+    }
     for (const row of rows) {
       this.memory.append(agentId, row.item, {
         timestamp: row.timestamp,
@@ -1741,6 +1748,54 @@ test("normalizeConfig injects the provider default model while leaving mode omit
   expect(snapshot.config.modeId).toBeUndefined();
 });
 
+test("agent.create hooks receive labels and are skipped for stored-config restores", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-plugin-labels-test-"));
+  const createRequests: unknown[] = [];
+  const pluginLifecycle = {
+    before: async (name: string, request: unknown) => {
+      if (name === "agent.create") {
+        createRequests.push(request);
+      }
+      return request;
+    },
+    emit: () => undefined,
+  } as unknown as PluginLifecycle;
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    pluginLifecycle,
+    logger,
+  });
+  const createdId = "00000000-0000-4000-8000-000000000107";
+  const restoredId = "00000000-0000-4000-8000-000000000108";
+  const labels = { "plugin.profile": "review" };
+
+  try {
+    await manager.createAgent({ provider: "codex", cwd: workdir }, createdId, {
+      labels,
+      workspaceId: undefined,
+    });
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toEqual({
+      config: { provider: "codex", cwd: workdir },
+      env: undefined,
+      labels,
+    });
+    expect((createRequests[0] as { labels?: Record<string, string> }).labels).not.toBe(labels);
+
+    await manager.createAgent({ provider: "codex", cwd: workdir }, restoredId, {
+      labels,
+      workspaceId: undefined,
+      restoreStoredConfig: true,
+    });
+    expect(createRequests).toHaveLength(1);
+  } finally {
+    await manager.closeAgent(createdId).catch(() => undefined);
+    await manager.closeAgent(restoredId).catch(() => undefined);
+    await manager.flushForShutdown().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("normalizeConfig leaves Claude mode omitted", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-claude-default-test-"));
   const manager = new AgentManager({
@@ -3048,6 +3103,7 @@ test("createAgent passes native Paseo tools through launch context without inter
       throw new Error("No tools registered in test catalog");
     },
   };
+  let factoryContext: { paseoToolAllowlist?: readonly string[] } | undefined;
 
   class NativeToolsClient extends TestAgentClient {
     override readonly capabilities = {
@@ -3076,7 +3132,10 @@ test("createAgent passes native Paseo tools through launch context without inter
     registry: storage,
     logger,
     mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
-    paseoToolCatalogFactory: () => paseoTools,
+    paseoToolCatalogFactory: (context) => {
+      factoryContext = context;
+      return paseoTools;
+    },
     idFactory: () => "00000000-0000-4000-8000-000000000106",
   });
 
@@ -3084,6 +3143,7 @@ test("createAgent passes native Paseo tools through launch context without inter
     {
       provider: "codex",
       cwd: workdir,
+      paseoToolAllowlist: ["get_agent_status"],
       mcpServers: {
         custom: {
           type: "stdio",
@@ -3096,6 +3156,11 @@ test("createAgent passes native Paseo tools through launch context without inter
   );
 
   expect(client.lastLaunchContext?.paseoTools).toBe(paseoTools);
+  expect(factoryContext).toEqual({
+    callerAgentId: snapshot.id,
+    paseoToolPolicy: undefined,
+    paseoToolAllowlist: ["get_agent_status"],
+  });
   expect(client.lastConfig?.mcpServers).toEqual({
     custom: {
       type: "stdio",
@@ -3108,6 +3173,8 @@ test("createAgent passes native Paseo tools through launch context without inter
       command: "custom-mcp",
     },
   });
+  expect(snapshot.config.paseoToolAllowlist).toEqual(["get_agent_status"]);
+  expect(manager.getPaseoToolAllowlist(snapshot.id)).toEqual(["get_agent_status"]);
 
   const stored = await storage.get(snapshot.id);
   expect(stored?.config?.mcpServers).toEqual({
@@ -3116,6 +3183,7 @@ test("createAgent passes native Paseo tools through launch context without inter
       command: "custom-mcp",
     },
   });
+  expect(stored?.config?.paseoToolAllowlist).toEqual(["get_agent_status"]);
 });
 
 test("createAgent allows best-effort internal MCP when the provider session reports no support", async () => {
@@ -3159,6 +3227,84 @@ test("createAgent allows best-effort internal MCP when the provider session repo
     url: `http://127.0.0.1:6767/mcp/agents?callerAgentId=${snapshot.id}`,
     headers: { Authorization: "Bearer cap-token" },
   });
+
+  rmSync(workdir, { recursive: true, force: true });
+});
+
+test("preapproves only the exposed internal Paseo MCP tools for capable providers", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class McpClient extends TestAgentClient {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: true,
+    };
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new TestAgentSession(config);
+    }
+  }
+
+  const client = new McpClient();
+  const applyToolPolicy = vi.fn(
+    (config: AgentSessionConfig, toolPolicy: ToolPolicy | undefined) => ({
+      ...config,
+      toolPolicy,
+    }),
+  );
+  const manager = new AgentManager({
+    clients: { codex: client },
+    providerDefinitions: {
+      codex: {
+        enabled: true,
+        supportsExactMcpPreapproval: true,
+        applyToolPolicy,
+      },
+    },
+    registry: storage,
+    logger,
+    mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+    resolvePaseoToolPolicy: () => ({ disabledTools: ["delete_heartbeat"] }),
+    idFactory: () => "00000000-0000-4000-8000-000000000112",
+  });
+
+  const snapshot = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      paseoToolAllowlist: ["list_agents", "create_heartbeat", "delete_heartbeat"],
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  expect(applyToolPolicy).toHaveBeenCalledWith(
+    expect.objectContaining({
+      mcpServers: {
+        paseo: {
+          type: "http",
+          url: `http://127.0.0.1:6767/mcp/agents?callerAgentId=${snapshot.id}`,
+        },
+      },
+    }),
+    {
+      preapproved: [
+        { kind: "mcp", server: "paseo", tool: "list_agents" },
+        { kind: "mcp", server: "paseo", tool: "create_heartbeat" },
+      ],
+    },
+  );
+  expect(client.lastConfig?.toolPolicy).toEqual({
+    preapproved: [
+      { kind: "mcp", server: "paseo", tool: "list_agents" },
+      { kind: "mcp", server: "paseo", tool: "create_heartbeat" },
+    ],
+  });
+  expect(snapshot.config.toolPolicy).toBeUndefined();
+  expect((await storage.get(snapshot.id))?.config?.toolPolicy).toBeUndefined();
 
   rmSync(workdir, { recursive: true, force: true });
 });
@@ -5057,6 +5203,30 @@ test("runAgent persists finished attention and idle status without an external s
   expect(persisted?.requiresAttention).toBe(true);
   expect(persisted?.attentionReason).toBe("finished");
   expect(persisted?.attentionTimestamp).toEqual(expect.any(String));
+});
+
+test("a quiet scheduled run suppresses only its successful finish attention edge", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-quiet-finish-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000144",
+  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Quiet heartbeat" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await manager.runAgent(snapshot.id, "quiet sweep", { suppressFinishAttention: true });
+  await manager.flush();
+  expect((await storage.get(snapshot.id))?.requiresAttention).toBe(false);
+
+  await manager.runAgent(snapshot.id, "human request");
+  await manager.flush();
+  expect((await storage.get(snapshot.id))?.requiresAttention).toBe(true);
 });
 
 test("archiveSnapshot clears persisted attention and normalizes running status", async () => {

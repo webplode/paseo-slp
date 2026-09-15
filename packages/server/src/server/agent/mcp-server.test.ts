@@ -239,6 +239,7 @@ function buildAgentStorageSpies() {
     applySnapshot: vi.fn(),
     list: vi.fn().mockResolvedValue([]),
     remove: vi.fn(),
+    fetchCommitted: vi.fn(),
   };
 }
 
@@ -1046,6 +1047,41 @@ describe("browser MCP tools", () => {
         isError: true,
       });
       expect(broker.calls).toEqual([]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("applies an agent ceiling to MCP listing and dispatch while preserving provider restrictions", async () => {
+    const agentManager = new BoundaryAgentManagerFake();
+    const agentStorage = new BoundaryAgentStorageFake();
+    const server = await createAgentMcpServer({
+      agentManager: agentManager as AgentManager,
+      agentStorage: agentStorage as AgentStorage,
+      providerSnapshotManager:
+        new BoundaryProviderSnapshotManagerFake() as unknown as ProviderSnapshotManager,
+      browserToolsEnabled: false,
+      callerAgentId: "agent-1",
+      paseoToolPolicy: { disabledTools: ["list_agents"] },
+      paseoToolAllowlist: ["list_agents", "get_agent_status", "speak"],
+      logger,
+    });
+    const client = await connectInMemoryMcpClient(server);
+
+    try {
+      const listedTools = await client.listTools();
+      const toolNames = listedTools.tools.map((tool) => tool.name);
+
+      expect(toolNames).toEqual(["get_agent_status"]);
+      await expect(client.callTool({ name: "list_agents", arguments: {} })).resolves.toEqual({
+        content: [{ type: "text", text: "MCP error -32602: Tool list_agents not found" }],
+        isError: true,
+      });
+      await expect(client.callTool({ name: "create_agent", arguments: {} })).resolves.toEqual({
+        content: [{ type: "text", text: "MCP error -32602: Tool create_agent not found" }],
+        isError: true,
+      });
     } finally {
       await client.close();
       await server.close();
@@ -4366,6 +4402,7 @@ describe("create_heartbeat MCP tool", () => {
       cron: "*/15 * * * *",
       timezone: "America/New_York",
       name: "status heartbeat",
+      quiet: true,
     });
 
     expect(createOrReplace).toHaveBeenCalledWith(
@@ -4378,6 +4415,7 @@ describe("create_heartbeat MCP tool", () => {
         },
         target: { type: "agent", agentId: "parent-agent" },
         name: "status heartbeat",
+        silentOnSuccess: true,
       }),
     );
   });
@@ -5805,26 +5843,28 @@ describe("agent snapshot MCP serialization", () => {
     ]);
   });
 
-  it("loads archived agents before reading get_agent_activity", async () => {
+  it("reads archived agent activity passively without resuming its provider", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     const record = createStoredRecord({ id: "archived-activity-agent" });
-    const snapshot = {
-      id: "archived-activity-agent",
-      currentModeId: "default",
-    } as ManagedAgent;
-    spies.agentManager.getAgent
-      .mockReturnValueOnce(null)
-      .mockReturnValue(snapshot)
-      .mockReturnValue(snapshot);
+    spies.agentManager.getAgent.mockReturnValue(null);
     spies.agentStorage.get.mockResolvedValue(record);
-    spies.agentManager.resumeAgentFromPersistence.mockResolvedValue(snapshot);
-    spies.agentManager.getTimeline.mockReturnValue([
-      {
-        kind: "status",
-        timestamp: "2026-04-11T00:00:00.000Z",
-        text: "Agent resumed",
-      },
-    ]);
+    spies.agentStorage.fetchCommitted.mockResolvedValue({
+      epoch: "epoch-passive",
+      direction: "tail",
+      reset: false,
+      staleCursor: false,
+      gap: false,
+      window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+      hasOlder: false,
+      hasNewer: false,
+      rows: [
+        {
+          seq: 1,
+          timestamp: "2026-04-11T00:00:00.000Z",
+          item: { type: "assistant_message", text: "Historical result" },
+        },
+      ],
+    });
 
     const server = await createAgentMcpServer({
       agentManager,
@@ -5839,29 +5879,43 @@ describe("agent snapshot MCP serialization", () => {
       expect.objectContaining({
         agentId: "archived-activity-agent",
         updateCount: 1,
-        currentModeId: "default",
+        currentModeId: record.lastModeId ?? null,
       }),
     );
-    expect(spies.agentManager.resumeAgentFromPersistence).toHaveBeenCalled();
-    expect(spies.agentManager.hydrateTimelineFromProvider).toHaveBeenCalledWith(
-      "archived-activity-agent",
-      { broadcast: expect.any(Function) },
+    expect(response.structuredContent.coverage).toEqual(
+      expect.objectContaining({ state: "complete", epoch: "epoch-passive" }),
     );
+    expect(spies.agentManager.resumeAgentFromPersistence).not.toHaveBeenCalled();
+    expect(spies.agentManager.hydrateTimelineFromProvider).not.toHaveBeenCalled();
   });
 
-  it("get_agent_activity limit counts projected messages, not raw deltas", async () => {
+  it("get_agent_activity returns stable references for repeated identical rows", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     const snapshot = createManagedAgent({ id: "live-activity-agent", currentModeId: "default" });
     spies.agentManager.getAgent.mockReturnValue(snapshot);
-    spies.agentManager.getTimeline.mockReturnValue([
-      { type: "user_message", text: "Say hi" },
-      { type: "assistant_message", text: "Hello " },
-      { type: "assistant_message", text: "world" },
-      { type: "assistant_message", text: "." },
-      { type: "assistant_message", text: " How" },
-      { type: "assistant_message", text: " are" },
-      { type: "assistant_message", text: " you?" },
-    ]);
+    spies.agentStorage.get.mockResolvedValue(createStoredRecord({ id: "live-activity-agent" }));
+    spies.agentStorage.fetchCommitted.mockResolvedValue({
+      epoch: "epoch-repeat",
+      direction: "tail",
+      reset: false,
+      staleCursor: false,
+      gap: false,
+      window: { minSeq: 7, maxSeq: 8, nextSeq: 9 },
+      hasOlder: false,
+      hasNewer: false,
+      rows: [
+        {
+          seq: 7,
+          timestamp: "2026-04-11T01:00:00.000Z",
+          item: { type: "assistant_message", text: "same" },
+        },
+        {
+          seq: 8,
+          timestamp: "2026-04-11T01:01:00.000Z",
+          item: { type: "assistant_message", text: "same" },
+        },
+      ],
+    });
 
     const server = await createAgentMcpServer({
       agentManager,
@@ -5870,27 +5924,35 @@ describe("agent snapshot MCP serialization", () => {
       providerSnapshotManager: createClaudeOnlyManager(),
     });
     const tool = registeredTool(server, "get_agent_activity");
-    const response = await tool.handler({ agentId: "live-activity-agent", limit: 1 });
-
-    const content = String(response.structuredContent.content);
-    expect(content).toContain("Hello world. How are you?");
+    const response = await tool.handler({ agentId: "live-activity-agent", limit: 2 });
+    expect(response.structuredContent.evidence.map((entry: { ref: string }) => entry.ref)).toEqual([
+      "live-activity-agent:epoch-repeat:7",
+      "live-activity-agent:epoch-repeat:8",
+    ]);
   });
 
-  it("get_agent_activity limit=2 returns the last two projected entries whole", async () => {
+  it("get_agent_activity preserves cursor gaps and partial coverage", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     const snapshot = createManagedAgent({ id: "live-activity-agent-2", currentModeId: "default" });
     spies.agentManager.getAgent.mockReturnValue(snapshot);
-    spies.agentManager.getTimeline.mockReturnValue([
-      { type: "user_message", text: "u1" },
-      { type: "assistant_message", text: "first " },
-      { type: "assistant_message", text: "answer" },
-      { type: "user_message", text: "u2" },
-      { type: "assistant_message", text: "second " },
-      { type: "assistant_message", text: "answer" },
-      { type: "user_message", text: "u3" },
-      { type: "assistant_message", text: "third " },
-      { type: "assistant_message", text: "answer" },
-    ]);
+    spies.agentStorage.get.mockResolvedValue(createStoredRecord({ id: "live-activity-agent-2" }));
+    spies.agentStorage.fetchCommitted.mockResolvedValue({
+      epoch: "epoch-new",
+      direction: "after",
+      reset: true,
+      staleCursor: false,
+      gap: true,
+      window: { minSeq: 10, maxSeq: 12, nextSeq: 13 },
+      hasOlder: true,
+      hasNewer: false,
+      rows: [
+        {
+          seq: 12,
+          timestamp: "2026-04-11T02:00:00.000Z",
+          item: { type: "assistant_message", text: "current" },
+        },
+      ],
+    });
 
     const server = await createAgentMcpServer({
       agentManager,
@@ -5899,13 +5961,37 @@ describe("agent snapshot MCP serialization", () => {
       providerSnapshotManager: createClaudeOnlyManager(),
     });
     const tool = registeredTool(server, "get_agent_activity");
-    const response = await tool.handler({ agentId: "live-activity-agent-2", limit: 2 });
+    const response = await tool.handler({
+      agentId: "live-activity-agent-2",
+      direction: "after",
+      cursor: { epoch: "epoch-new", seq: 1 },
+      limit: 1,
+    });
+    expect(response.structuredContent.coverage).toEqual(
+      expect.objectContaining({ state: "partial", reset: true, gap: true, truncated: true }),
+    );
+  });
 
-    const content = String(response.structuredContent.content);
-    expect(content).toContain("[User] u3");
-    expect(content).toContain("third answer");
-    expect(content).not.toContain("[User] u2");
-    expect(content).not.toContain("second answer");
-    expect(content).not.toContain("first answer");
+  it("get_agent_activity exposes a passive read failure instead of reporting healthy", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentStorage.get.mockResolvedValue(createStoredRecord({ id: "failed-reader-agent" }));
+    spies.agentStorage.fetchCommitted.mockRejectedValue(new Error("stored timeline is unreadable"));
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      logger: createTestLogger(),
+      providerSnapshotManager: createClaudeOnlyManager(),
+    });
+    const response = await registeredTool(server, "get_agent_activity").handler({
+      agentId: "failed-reader-agent",
+      direction: "after",
+      cursor: { epoch: "old", seq: 2 },
+    });
+
+    expect(response.structuredContent.coverage).toEqual(
+      expect.objectContaining({ state: "failed", readError: "stored timeline is unreadable" }),
+    );
+    expect(response.structuredContent.evidence).toEqual([]);
+    expect(spies.agentManager.resumeAgentFromPersistence).not.toHaveBeenCalled();
   });
 });

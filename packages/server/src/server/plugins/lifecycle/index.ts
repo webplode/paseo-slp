@@ -28,7 +28,9 @@ export const lifecycleEventNames = [
 export const beforeHookNames = ["agent.create", "agent.session_open", "workspace.create"] as const;
 
 const beforeSchemas = {
-  "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true }).strict(),
+  "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true })
+    .extend({ labels: z.record(z.string(), z.string()).optional() })
+    .strict(),
   "agent.session_open": z
     .object({
       agentId: z.string(),
@@ -155,8 +157,29 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
     if (previous.config.cwd !== next.config.cwd) {
       throw new Error("agent.create hooks cannot change the workspace directory");
     }
+    if (!sameStringRecord(previous.labels, next.labels)) {
+      throw new Error("agent.create hooks cannot change labels");
+    }
   }
   return result;
+}
+
+function sameStringRecord(
+  previous: Readonly<Record<string, string>> | undefined,
+  next: Readonly<Record<string, string>> | undefined,
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (!previous || !next) {
+    return false;
+  }
+  const previousKeys = Object.keys(previous);
+  const nextKeys = Object.keys(next);
+  if (previousKeys.length !== nextKeys.length) {
+    return false;
+  }
+  return previousKeys.every((key) => previous[key] === next[key]);
 }
 
 type Handler = (input: unknown, context: PluginHookContext) => unknown;

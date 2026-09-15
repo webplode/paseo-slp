@@ -59,6 +59,10 @@ export interface AgentTimelineStore {
   getLastItem(agentId: string): Promise<AgentTimelineItem | null>;
   getLastAssistantMessage(agentId: string): Promise<string | null>;
   deleteAgent(agentId: string): Promise<void>;
-  bulkInsert(agentId: string, rows: readonly AgentTimelineRow[]): Promise<void>;
+  bulkInsert(
+    agentId: string,
+    rows: readonly AgentTimelineRow[],
+    options?: { epoch?: string; nextSeq?: number },
+  ): Promise<void>;
   updateCommittedRow(agentId: string, row: AgentTimelineRow): Promise<void>;
 }

@@ -514,6 +514,11 @@ export interface AgentSessionConfig {
   toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
   /**
+   * Optional per-agent ceiling for daemon-provided Paseo tools. Omit this
+   * field to retain the host/provider tool surface; an empty list exposes none.
+   */
+  paseoToolAllowlist?: string[];
+  /**
    * Internal agents are hidden from listings and don't trigger notifications.
    * They are used for ephemeral system tasks like commit/PR generation.
    */
