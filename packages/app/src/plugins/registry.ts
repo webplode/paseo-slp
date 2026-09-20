@@ -84,6 +84,7 @@ export class PluginRegistry {
           surfaces: [],
           settingsScreens: [],
           sidebarItems: [],
+          draftComposers: [],
           workspacePanels: [],
           commandCenterItems: [],
           clientSlashCommands: [],

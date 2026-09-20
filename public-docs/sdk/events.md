@@ -8,7 +8,9 @@ category: TypeScript SDK
 
 # SDK events
 
-Subscriptions report changes after they happen. Fetch an initial snapshot first, then apply updates to it.
+Subscriptions report changes after they happen. For the project catalog, subscribe before fetching
+the initial snapshot, then apply updates to it. Agent and workspace directory subscriptions use the
+explicit list bootstrap described below.
 
 Every `subscribe()` method returns an unsubscribe function. Timeline, project, and provider subscriptions establish network demand and restore it after reconnect. Unsubscribing releases that demand when its last listener leaves. Agent and workspace directories use the explicit `list({ subscribe })` bootstrap shown below. Unsubscribing never stops or archives the underlying resource.
 

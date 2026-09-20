@@ -52,14 +52,52 @@ export const CodexProviderOptionsSchema = z
     features: z
       .object({
         network_proxy: z.union([z.boolean(), NetworkPolicySchema]).optional(),
+        goals: z.boolean().optional(),
+        multi_agent: z.boolean().optional(),
         multi_agent_v2: z.boolean().optional(),
       })
       .strict()
       .optional(),
+    agents: z.object({ enabled: z.boolean().optional() }).strict().optional(),
   })
   .strict() satisfies z.ZodType<ProviderOptions>;
 
 export type CodexProviderOptions = z.infer<typeof CodexProviderOptionsSchema>;
+
+// Host config supplies defaults. Explicit session options must survive nested
+// feature/config merges, including when a persisted session opens a new process.
+export function mergeCodexProviderOptions(
+  defaults: Record<string, unknown> | null | undefined,
+  options: CodexProviderOptions,
+): Record<string, unknown> {
+  const merged = mergeConfigRecords(defaults ?? {}, options);
+  // Native config also accepts dotted keys. Keep equivalent host keys in
+  // agreement with the session leaf instead of leaving a competing override.
+  for (const key of Object.keys(defaults ?? {})) {
+    if (!key.includes(".")) continue;
+    let value: unknown = options;
+    for (const part of key.split(".")) {
+      value = isRecord(value) ? value[part] : undefined;
+    }
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged;
+}
+
+function mergeConfigRecords(
+  defaults: Record<string, unknown>,
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = { ...defaults };
+  for (const [key, value] of Object.entries(overrides)) {
+    merged[key] = isRecord(value) ? mergeConfigRecords(readRecord(merged[key]), value) : value;
+  }
+  return merged;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 export function applyCodexToolPolicy(
   config: Record<string, unknown>,

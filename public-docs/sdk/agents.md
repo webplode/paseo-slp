@@ -26,6 +26,10 @@ const result = await agent.waitForFinish();
 console.log(result.status, result.lastMessage);
 ```
 
+Plugin-owned role launchers can add `pluginDependencies: ["plugin-id"]` to the same creation
+options. Since v0.8.1, the SDK checks `server_info.features.pluginDependencies` and rejects an
+unsupported host before sending the request. Omitting the list keeps ordinary creation unchanged.
+
 `waitForFinish()` returns one of four statuses:
 
 | Status       | Meaning                                                           |

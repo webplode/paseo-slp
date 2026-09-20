@@ -989,6 +989,11 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       "Required provider/model pair, for example codex/gpt-5.4.",
     ),
     labels: z.record(z.string(), z.string()).optional().describe("Labels to set on the agent"),
+    pluginDependencies: z
+      .array(z.string().min(1))
+      .max(32)
+      .optional()
+      .describe("Plugin ids that must remain loaded while this agent is created."),
     settings: CreateAgentSettingsInputSchema.optional().describe(
       "Initial runtime settings for the new agent.",
     ),
@@ -1466,6 +1471,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           thinking: parsedArgs.settings?.thinkingOptionId,
           features: parsedArgs.settings?.features,
           labels: parsedArgs.labels,
+          pluginDependencies: parsedArgs.pluginDependencies,
           mode: parsedArgs.settings?.modeId,
           background: requestedBackground,
           notifyOnFinish,

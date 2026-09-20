@@ -1,4 +1,5 @@
 {
   "id": "slp",
-  "requirements": { "paseo": ">=0.8.0" }
+  "requirements": { "paseo": ">=0.8.1" },
+  "build": [["node", "scripts/generate-workspace-protocol-template.mjs"]]
 }

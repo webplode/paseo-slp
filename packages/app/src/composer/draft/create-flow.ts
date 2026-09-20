@@ -299,7 +299,7 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
         clientMessageId: generateMessageId(),
         text: trimmedPrompt,
         timestamp: new Date(),
-        ...(images && images.length > 0 ? { images } : {}),
+        ...(images.length > 0 ? { images } : {}),
         ...(wirePayload.attachments.length > 0 ? { attachments: wirePayload.attachments } : {}),
       };
 

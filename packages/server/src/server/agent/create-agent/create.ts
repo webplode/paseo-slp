@@ -66,6 +66,7 @@ export interface CreateAgentFromSessionInput {
   attachments?: AgentAttachment[];
   git?: GitSetupOptions;
   labels: Record<string, string>;
+  pluginDependencies?: readonly string[];
   env?: Record<string, string>;
   provisionalTitle: string | null;
   firstAgentContext: FirstAgentContext;
@@ -88,6 +89,7 @@ export interface CreateAgentFromMcpInput {
   thinking?: string;
   features?: Record<string, unknown>;
   labels?: Record<string, string>;
+  pluginDependencies?: readonly string[];
   mode?: string;
   unattended?: boolean;
   promptFailure?: CreateAgentPromptFailureMode;
@@ -281,6 +283,7 @@ async function resolveSessionCreateAgent(
     config: sessionConfig,
     createOptions: {
       labels: input.labels,
+      ...(input.pluginDependencies ? { pluginDependencies: input.pluginDependencies } : {}),
       initialPrompt: trimmedPrompt,
       env: input.env,
       initialTitle: input.provisionalTitle,
@@ -356,6 +359,7 @@ async function resolveMcpCreateAgent(
     }),
     createOptions: {
       ...(Object.keys(intent.labels).length > 0 ? { labels: intent.labels } : {}),
+      ...(input.pluginDependencies ? { pluginDependencies: input.pluginDependencies } : {}),
       workspaceId: intent.workspaceId,
       owner: input.owner,
       env: input.env,

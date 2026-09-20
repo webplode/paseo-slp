@@ -55,7 +55,11 @@ Create a new client after `close()`.
 | `ref(agentOrId)`     | `PaseoAgentHandle`     | Creates a local handle without fetching.                                                                     |
 | `subscribe(handler)` | Unsubscribe function   | Listens for connection-local agent directory updates. Call `list({ subscribe })` first.                      |
 
-Creation options include `config`, `cwd`, `parent`, `title`, `prompt`, `env`, `outputSchema`, `images`, `attachments`, `git`, `worktree`, `autoArchive`, and `labels`.
+Creation options include `config`, `cwd`, `parent`, `title`, `prompt`, `env`, `outputSchema`, `images`, `attachments`, `git`, `worktree`, `autoArchive`, `labels`, and optional `pluginDependencies`.
+
+`pluginDependencies` is a list of runtime plugin IDs that must be loaded for this creation.
+Since v0.8.1, the SDK checks `server_info.features.pluginDependencies` before sending a non-empty
+list and rejects unsupported hosts. Omit it for ordinary agents.
 
 `config` accepts:
 

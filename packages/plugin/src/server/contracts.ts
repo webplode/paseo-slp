@@ -23,4 +23,17 @@ export interface PluginServerContext extends PluginLifecycleRegistration {
   registerProvider(provider: ProviderRegistration): void;
 }
 
-export type PluginServerContribution = (server: PluginServerContext) => PluginCleanup;
+/**
+ * The connected daemon API available while a server contribution is activated.
+ *
+ * This is the same connection later supplied to handlers and lifecycle hooks;
+ * plugins must release subscriptions from their contribution cleanup.
+ */
+export interface PluginServerActivationContext {
+  readonly paseo: PaseoApi;
+}
+
+export type PluginServerContribution = (
+  server: PluginServerContext,
+  activation: PluginServerActivationContext,
+) => PluginCleanup;

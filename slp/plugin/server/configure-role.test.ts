@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginHookContext, PluginBeforeRequests } from "@getpaseo/plugin/server";
 import { configureRole, rolePaseoToolAllowlists } from "./configure-role";
 import {
@@ -19,8 +22,15 @@ const profile = {
   notes: "[slp:lead] [slp:peer]\nInvestigations and independent review.",
   featureValues: { fast_mode: false },
 };
+const temporaryRoots: string[] = [];
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
 function fixture() {
-  const cwd = process.cwd();
+  const cwd = mkdtempSync(path.join(tmpdir(), "paseo-slp-configure-role-"));
+  temporaryRoots.push(cwd);
   const get = vi.fn().mockResolvedValue({ config: { agentProfiles: [profile] } });
   const listModes = vi
     .fn()
@@ -39,6 +49,11 @@ function fixture() {
             labels: { "slp.role": "supervisor" },
           },
         }),
+      }),
+    },
+    projects: {
+      list: vi.fn().mockResolvedValue({
+        projects: [{ projectId: "project-1", projectRootPath: cwd }],
       }),
     },
     workspaces: {
@@ -73,14 +88,15 @@ describe("SLP launch", () => {
 
   it("injects the selected role before the first turn and applies saved settings", async () => {
     const { paseo, request } = fixture();
+    const globalProtocolPath = path.join(request.config.cwd, ".paseo", "workspace_protocol.md");
     request.config.providerOptions = {
       sandbox_mode: "read-only",
       web_search: "disabled",
     };
-    const result = await configureRole(request, paseo);
+    const result = await configureRole(request, paseo, globalProtocolPath);
     expect(result.config).toMatchObject({
       provider: "codex",
-      cwd: process.cwd(),
+      cwd: request.config.cwd,
       model: "model-a",
       thinkingOptionId: "max",
       modeId: "full-access",
@@ -93,15 +109,95 @@ describe("SLP launch", () => {
     });
     expect(result.config.systemPrompt).toContain("# Peer");
     expect(result.config.systemPrompt).not.toContain("# Lead");
+    expect(result.config.systemPrompt).not.toContain("# SLP Global Workspace Protocol");
+    expect(result.config.systemPrompt).toContain(globalProtocolPath);
+    expect(result.config.systemPrompt).toContain(
+      path.join(request.config.cwd, "WORKSPACE_PROTOCOL.md"),
+    );
+    expect(result.config.systemPrompt!.indexOf(globalProtocolPath)).toBeLessThan(
+      result.config.systemPrompt!.indexOf(path.join(request.config.cwd, "WORKSPACE_PROTOCOL.md")),
+    );
+    expect(result.config.systemPrompt).toContain("## Workspace protocols");
     expect(result.config.systemPrompt).toContain("## Priority workflows");
     expect(result.config.systemPrompt).toContain("architecture-premise-audit");
     expect(result.config.systemPrompt).toContain("test-proof-debt-audit");
     expect(result.config.systemPrompt).toContain("frontend-design");
     expect(result.config.systemPrompt).toContain("repo-refresh");
     expect(result.config.systemPrompt).toContain("Council and Ultra Review are not admitted");
+    expect(result.config.systemPrompt).not.toContain("explicit-only Lead method");
+    expect(result.config.systemPrompt).not.toContain("open-code-review-delegate");
     expect(result.config.systemPrompt).toContain("Assignment-specific constraint.");
     expect(result.labels).toEqual(request.labels);
   });
+
+  it("adds the stronger role-specific closure contracts without mixing role authority", async () => {
+    const { paseo, request, get } = fixture();
+
+    const peer = await configureRole(request, paseo);
+    expect(peer.config.systemPrompt).toContain("Notify Lead before changing a shared");
+    expect(peer.config.systemPrompt).toContain("verification environment");
+    expect(peer.config.systemPrompt).toContain("retain or release write ownership");
+
+    get.mockResolvedValue({
+      config: { agentProfiles: [{ ...profile, notes: "[slp:lead]" }] },
+    });
+    request.labels!["slp.role"] = "lead";
+    const lead = await configureRole(request, paseo);
+    expect(lead.config.systemPrompt).toContain("Close every actionable Peer response");
+    expect(lead.config.systemPrompt).toContain("existing status source");
+    expect(lead.config.systemPrompt).toContain("usable downstream inputs");
+
+    get.mockResolvedValue({
+      config: { agentProfiles: [{ ...profile, notes: "[slp:supervisor]" }] },
+    });
+    request.labels!["slp.role"] = "supervisor";
+    const supervisor = await configureRole(request, paseo);
+    expect(supervisor.config.systemPrompt).toContain("private communication path");
+    expect(supervisor.config.systemPrompt).toContain("original Lead brief");
+    expect(supervisor.config.systemPrompt).toContain("Lead's disposition");
+    expect(supervisor.config.systemPrompt).toContain("acknowledgment alone is not");
+  });
+
+  it("gives only Lead the explicit Triple Review routing method", async () => {
+    const { paseo, request, get } = fixture();
+    get.mockResolvedValue({
+      config: { agentProfiles: [{ ...profile, notes: "[slp:lead]" }] },
+    });
+    request.labels!["slp.role"] = "lead";
+
+    const result = await configureRole(request, paseo);
+
+    expect(result.config.systemPrompt).toContain("triple-review");
+    expect(result.config.systemPrompt).toContain("explicit-only Lead method");
+    expect(result.config.systemPrompt).toContain("ordinary Reviewer Peers");
+    expect(result.config.systemPrompt).not.toContain("open-code-review-delegate");
+  });
+
+  it("gives Reviewer Peers the OCR coverage and stale-candidate contract", async () => {
+    const { paseo, request } = fixture();
+    request.labels!["slp.subrole"] = "reviewer";
+
+    const result = await configureRole(request, paseo);
+
+    expect(result.config.systemPrompt).toContain("## Peer specialization: Reviewer");
+    expect(result.config.systemPrompt).toContain("open-code-review-delegate");
+    expect(result.config.systemPrompt).toContain("every selected (path, status)");
+    expect(result.config.systemPrompt).toContain("candidate identity changes");
+    expect(result.config.systemPrompt).not.toContain("explicit-only Lead method");
+  });
+
+  it.each(["engineer", "scout", "architect"] as const)(
+    "keeps review routing out of the %s Peer prompt",
+    async (subrole) => {
+      const { paseo, request } = fixture();
+      request.labels!["slp.subrole"] = subrole;
+
+      const result = await configureRole(request, paseo);
+
+      expect(result.config.systemPrompt).not.toContain("explicit-only Lead method");
+      expect(result.config.systemPrompt).not.toContain("open-code-review-delegate");
+    },
+  );
 
   it.each(["peer", "watcher", "lead", "supervisor"] as const)(
     "projects the %s role's Paseo ceiling without changing profile settings",
@@ -127,6 +223,181 @@ describe("SLP launch", () => {
       expect(result.config.model).toBe(profile.model);
       expect(result.config.thinkingOptionId).toBe(profile.thinkingOptionId);
       expect(result.config.provider).toBe(profile.provider);
+      expect(result.config.providerOptions).toMatchObject({
+        features: { multi_agent: false, multi_agent_v2: false },
+        agents: { enabled: false },
+      });
+      if (role === "watcher" || role === "supervisor") {
+        expect(result.config.systemPrompt).not.toContain("explicit-only Lead method");
+        expect(result.config.systemPrompt).not.toContain("open-code-review-delegate");
+      }
+      if (role === "watcher") {
+        expect(result.config.systemPrompt).not.toContain("# SLP Global Workspace Protocol");
+        expect(result.config.systemPrompt).not.toContain("workspace_protocol.md");
+        expect(result.config.systemPrompt).not.toContain("## Workspace protocols");
+      } else {
+        expect(result.config.systemPrompt).not.toContain("# SLP Global Workspace Protocol");
+        expect(result.config.systemPrompt).toContain("workspace_protocol.md");
+        expect(result.config.systemPrompt).toContain("## Workspace protocols");
+      }
+    },
+  );
+
+  it("pins Codex delegation after launch overrides without disabling unrelated features", async () => {
+    const { paseo, request } = fixture();
+    request.config.featureValues = { fast_mode: true };
+    request.config.providerOptions = {
+      features: {
+        multi_agent: true,
+        multi_agent_v2: true,
+        network_proxy: true,
+      },
+      agents: { enabled: true },
+      web_search: "live",
+    };
+
+    const result = await configureRole(request, paseo);
+
+    expect(result.config.providerOptions).toEqual({
+      features: {
+        multi_agent: false,
+        multi_agent_v2: false,
+        network_proxy: true,
+      },
+      agents: { enabled: false },
+      web_search: "live",
+      sandbox_mode: "danger-full-access",
+      approval_policy: "never",
+    });
+    expect(result.config.featureValues).toEqual({ fast_mode: true });
+  });
+
+  it.each(["codex", "claude"] as const)(
+    "qualifies a custom profile by its %s base family",
+    async (family) => {
+      const { paseo, request, get, listModes } = fixture();
+      request.config.provider = "custom-provider";
+      get.mockResolvedValue({
+        config: {
+          agentProfiles: [{ ...profile, provider: "custom-provider" }],
+          providers: { "custom-provider": { extends: family, enabled: true } },
+        },
+      });
+      listModes.mockResolvedValue({
+        modes: [{ id: family === "codex" ? "full-access" : "bypassPermissions" }],
+      });
+      const result = await configureRole(request, paseo);
+      expect(result.config.provider).toBe("custom-provider");
+      expect(result.config.providerOptions).toMatchObject(
+        family === "codex"
+          ? {
+              features: { multi_agent: false, multi_agent_v2: false },
+              agents: { enabled: false },
+            }
+          : {
+              disallowedTools: ["Agent", "Task", "SendMessage"],
+              settings: { env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" } },
+            },
+      );
+    },
+  );
+
+  it("fails closed for an alias whose base family is unknown", async () => {
+    const { paseo, request, get } = fixture();
+    request.config.provider = "custom-provider";
+    get.mockResolvedValue({
+      config: { agentProfiles: [{ ...profile, provider: "custom-provider" }] },
+    });
+    await expect(configureRole(request, paseo)).rejects.toThrow(
+      "SLP cannot qualify provider custom-provider",
+    );
+  });
+
+  it.each(["codex", "claude"] as const)(
+    "keeps custom %s Watcher qualification and native policy",
+    async (family) => {
+      const { paseo, request, get, listModes } = fixture();
+      request.config.provider = "custom-provider";
+      request.labels = {
+        "slp.role": "watcher",
+        "slp.profile": "careful",
+        "slp.watcher.supervisor": "supervisor-1",
+        "slp.watcher.workspace": "workspace-1",
+        "slp.watcher.cadence-minutes": "15",
+      };
+      get.mockResolvedValue({
+        config: {
+          agentProfiles: [{ ...profile, provider: "custom-provider", notes: "[slp:watcher]" }],
+          providers: { "custom-provider": { extends: family } },
+        },
+      });
+      listModes.mockResolvedValue({
+        modes: [{ id: family === "codex" ? "read-only" : "bypassPermissions" }],
+      });
+      const result = await configureRole(request, paseo);
+      expect(result.config.providerOptions).toMatchObject(
+        family === "codex"
+          ? {
+              sandbox_mode: "read-only",
+              features: {
+                multi_agent: false,
+                multi_agent_v2: false,
+                goals: false,
+              },
+              agents: { enabled: false },
+            }
+          : {
+              tools: [],
+              disallowedTools: ["Agent", "Task", "SendMessage"],
+              settings: { env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" } },
+            },
+      );
+      expect(result.config.paseoToolAllowlist).toEqual(rolePaseoToolAllowlists.watcher);
+    },
+  );
+
+  it.each(["peer", "lead", "supervisor"] as const)(
+    "pins Claude %s teams and native delegation without replacing other tools or settings",
+    async (role) => {
+      const { paseo, request, get, listModes } = fixture();
+      request.config.provider = "claude";
+      request.labels!["slp.role"] = role;
+      request.config.providerOptions = {
+        allowedTools: ["Read", "Agent"],
+        disallowedTools: ["WebSearch", "Task"],
+        tools: { type: "preset", preset: "claude_code" },
+        settings: {
+          env: {
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
+            UNRELATED_FLAG: "keep",
+          },
+          permissions: { allow: ["Read"], deny: ["Write"] },
+          sandbox: { enabled: false },
+        },
+      };
+      get.mockResolvedValue({
+        config: {
+          agentProfiles: [{ ...profile, provider: "claude", notes: `[slp:${role}]` }],
+        },
+      });
+      listModes.mockResolvedValue({ modes: [{ id: "bypassPermissions" }] });
+
+      const result = await configureRole(request, paseo);
+
+      expect(result.config.providerOptions).toEqual({
+        allowedTools: ["Read", "Agent"],
+        disallowedTools: ["WebSearch", "Task", "Agent", "SendMessage"],
+        tools: { type: "preset", preset: "claude_code" },
+        settings: {
+          env: {
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0",
+            UNRELATED_FLAG: "keep",
+          },
+          permissions: { allow: ["Read"], deny: ["Write"] },
+          sandbox: { enabled: false },
+        },
+      });
+      expect(result.config.paseoToolAllowlist).toEqual(rolePaseoToolAllowlists[role]);
     },
   );
 
@@ -209,7 +480,7 @@ describe("SLP launch", () => {
 
     const ordinary = await configureRole(request, paseo);
     expect(ordinary.config.paseoToolAllowlist).not.toContain("create_agent");
-    expect(ordinary.config.systemPrompt).toContain("Human launcher route");
+    expect(ordinary.config.systemPrompt).toContain("Lead recovery boundary");
 
     request.labels["slp.recovery"] = "lead";
     const recovery = await configureRole(request, paseo);
@@ -219,7 +490,7 @@ describe("SLP launch", () => {
     expect(recovery.config.systemPrompt).toContain("Replace at most one Lead");
   });
 
-  it("rejects a second active notebook writer for the same project", async () => {
+  it("grants notebook-write authority without a notebook label or lease", async () => {
     const { paseo, request, get } = fixture();
     get.mockResolvedValue({
       config: { agentProfiles: [{ ...profile, notes: "[slp:supervisor]" }] },
@@ -227,15 +498,12 @@ describe("SLP launch", () => {
     request.labels = {
       "slp.role": "supervisor",
       "slp.profile": "careful",
-      "slp.notebook": "writer",
+      "slp.attention": "workspace",
     };
-    vi.mocked(paseo.agents.list).mockResolvedValue({
-      entries: [{ agent: { id: "existing", workspaceId: "workspace-1", status: "idle" } }],
-    } as never);
-
-    await expect(configureRole(request, paseo)).rejects.toThrow(
-      "already has an active Supervisor notebook writer",
-    );
+    const result = await configureRole(request, paseo);
+    expect(result.config.systemPrompt).toContain("automatically hold notebook-write authority");
+    expect(result.config.systemPrompt).not.toContain("notebook-writer lease");
+    expect(paseo.agents.list).not.toHaveBeenCalled();
   });
 
   it("pins task-specific model and budget overrides without rewriting the profile", async () => {
@@ -304,7 +572,10 @@ describe("SLP launch", () => {
     request.config.mcpServers = {
       untrusted: { type: "http", url: "http://example.invalid/mcp" },
     };
-    request.config.providerOptions = { allowedTools: ["Read"] };
+    request.config.providerOptions = {
+      allowedTools: ["Read"],
+      settings: { env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" } },
+    };
     request.labels = {
       "slp.role": "watcher",
       "slp.profile": "claude-watcher",
@@ -328,7 +599,12 @@ describe("SLP launch", () => {
 
     const result = await configureRole(request, paseo);
     expect(result.config.modeId).toBe("bypassPermissions");
-    expect(result.config.providerOptions).toMatchObject({ allowedTools: ["Read"], tools: [] });
+    expect(result.config.providerOptions).toMatchObject({
+      allowedTools: ["Read"],
+      tools: [],
+      disallowedTools: ["Agent", "Task", "SendMessage"],
+      settings: { env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" } },
+    });
     expect(result.config.mcpServers).toBeUndefined();
   });
 

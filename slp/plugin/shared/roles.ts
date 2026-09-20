@@ -1,5 +1,6 @@
 export const roles = ["supervisor", "watcher", "lead", "peer"] as const;
 export type Role = (typeof roles)[number];
+export const SLP_PLUGIN_ID = "slp";
 export const peerSubroles = ["engineer", "scout", "architect", "reviewer"] as const;
 export type PeerSubrole = (typeof peerSubroles)[number];
 
@@ -13,8 +14,6 @@ export const watcherTriggerPromptPrefix = "SLP Watcher trigger —";
 export const watcherRepairPromptPrefix = "SLP Watcher format repair — machine route.";
 export const recoveryLeaseLabel = "slp.recovery";
 export const recoveryLeaseValue = "lead";
-export const notebookWriterLabel = "slp.notebook";
-export const notebookWriterValue = "writer";
 
 export function roleLabel(role: Role | PeerSubrole): string {
   return role[0].toUpperCase() + role.slice(1);

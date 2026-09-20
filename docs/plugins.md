@@ -239,6 +239,27 @@ created by plugin code. Paseo removes registered contributions, unmounts surface
 state, rejects pending RPCs, closes the plugin's daemon session, and stops the subprocess. Cleanup
 errors are logged and do not interrupt host teardown.
 
+Server contributions receive the already-connected native SDK as a second argument. Import
+`PluginServerActivationContext` from `@getpaseo/plugin/server`; its `paseo` value is the same
+connection later supplied to handlers and lifecycle hooks. If activation subscribes to SDK events,
+subscribe before the initial list when a complete view is required, and release the returned
+unsubscribe function from contribution cleanup.
+
+```ts
+import type { PluginServerActivationContext, PluginServerContext } from "@getpaseo/plugin/server";
+
+export default function contribute(
+  server: PluginServerContext,
+  { paseo }: PluginServerActivationContext,
+) {
+  const unsubscribe = paseo.projects.subscribe((update) => {
+    console.log(update.kind);
+  });
+  void paseo.projects.list();
+  return () => unsubscribe();
+}
+```
+
 Paseo owns the route, screen header, Lucide icon validation, close action, theme DTO, layout facts,
 and render error boundary. The contributed component owns the complete body below the header.
 

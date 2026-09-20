@@ -1759,6 +1759,7 @@ test("agent.create hooks receive labels and are skipped for stored-config restor
       return request;
     },
     emit: () => undefined,
+    assertDependencies: () => undefined,
   } as unknown as PluginLifecycle;
   const manager = new AgentManager({
     clients: { codex: new TestAgentClient() },
@@ -1791,6 +1792,45 @@ test("agent.create hooks receive labels and are skipped for stored-config restor
   } finally {
     await manager.closeAgent(createdId).catch(() => undefined);
     await manager.closeAgent(restoredId).catch(() => undefined);
+    await manager.flushForShutdown().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("agent creation fails closed when a declared plugin dependency is unavailable", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-plugin-dependency-test-"));
+  const client = new TestAgentClient();
+  const pluginLifecycle = {
+    before: async (_name: string, request: unknown) => request,
+    emit: () => undefined,
+    assertDependencies: (dependencies?: readonly string[]) => {
+      if (dependencies?.includes("slp")) {
+        throw new Error("Required plugin is unavailable: slp");
+      }
+    },
+  } as unknown as PluginLifecycle;
+  const manager = new AgentManager({ clients: { codex: client }, pluginLifecycle, logger });
+
+  try {
+    await expect(
+      manager.createAgent(
+        { provider: "codex", cwd: workdir },
+        "00000000-0000-4000-8000-000000000109",
+        { workspaceId: undefined, pluginDependencies: ["slp"] },
+      ),
+    ).rejects.toThrow("Required plugin is unavailable: slp");
+    expect(client.createdConfigs).toHaveLength(0);
+
+    await expect(
+      manager.createAgent(
+        { provider: "codex", cwd: workdir },
+        "00000000-0000-4000-8000-000000000110",
+        { workspaceId: undefined },
+      ),
+    ).resolves.toBeDefined();
+    expect(client.createdConfigs).toHaveLength(1);
+  } finally {
+    await manager.closeAgent("00000000-0000-4000-8000-000000000110").catch(() => undefined);
     await manager.flushForShutdown().catch(() => undefined);
     rmSync(workdir, { recursive: true, force: true });
   }

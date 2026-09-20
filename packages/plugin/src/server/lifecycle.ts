@@ -68,6 +68,8 @@ export interface PluginBeforeRequests {
   "agent.create": {
     config: AgentSessionConfig;
     env?: Record<string, string>;
+    /** Plugin ids the caller requires to remain loaded for this creation. */
+    readonly pluginDependencies?: readonly string[];
     readonly labels?: Readonly<Record<string, string>>;
   };
   "agent.session_open": PluginSessionOpenRequest;

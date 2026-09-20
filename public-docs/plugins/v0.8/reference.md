@@ -79,10 +79,10 @@ and cannot show this new diagnostic.
 
 ### Runtime entries
 
-| Entry              | Runtime               | Receives              | Required                                                                        |
-| ------------------ | --------------------- | --------------------- | ------------------------------------------------------------------------------- |
-| `index.client.tsx` | Paseo app, per client | `PluginClientContext` | When the plugin has any UI, callback, theme, or attachment source               |
-| `index.server.ts`  | Daemon subprocess     | `PluginServerContext` | When the plugin contributes handlers, hooks, settings persistence, or providers |
+| Entry              | Runtime               | Receives                                               | Required                                                                        |
+| ------------------ | --------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `index.client.tsx` | Paseo app, per client | `PluginClientContext`                                  | When the plugin has any UI, callback, theme, or attachment source               |
+| `index.server.ts`  | Daemon subprocess     | `PluginServerContext`, `PluginServerActivationContext` | When the plugin contributes handlers, hooks, settings persistence, or providers |
 
 At least one entry is required; both accept `.ts` or `.tsx`. A directory that still has only the
 old `index.ts` fails to load and points at the [migration guide](/docs/plugins/v0.8/migration).
@@ -223,7 +223,8 @@ SVG or URL.
 ## Entry point and cleanup
 
 Each present entry default-exports one contribution function and returns cleanup. Client entries
-receive `PluginClientContext`; server entries receive `PluginServerContext`. Client registration methods return idempotent removers, except header buttons and composer pills,
+receive `PluginClientContext`; server entries receive `PluginServerContext` plus a
+`PluginServerActivationContext`. Client registration methods return idempotent removers, except header buttons and composer pills,
 which return `{ update, remove }` handles. The entry cleanup runs before Paseo removes remaining registrations.
 
 ```ts
@@ -233,6 +234,29 @@ import { Main } from "./client/main";
 export default function contribute(client: PluginClientContext) {
   client.addSurface("main", Main);
   return () => {};
+}
+```
+
+The server activation context exposes the already-connected native `PaseoApi` as `paseo`. It is
+the same connection later supplied to handler and lifecycle-hook contexts; do not create another
+daemon client. Subscribe before the initial list when a complete view must not miss updates, and
+release every SDK subscription from contribution cleanup.
+
+This activation context is available in Paseo v0.8.1 and later. Set
+`requirements.paseo: ">=0.8.1"` when using it.
+
+```ts
+import type { PluginServerActivationContext, PluginServerContext } from "@getpaseo/plugin/server";
+
+export default function contribute(
+  server: PluginServerContext,
+  { paseo }: PluginServerActivationContext,
+) {
+  const unsubscribe = paseo.projects.subscribe((update) => {
+    console.log(update.kind);
+  });
+  void paseo.projects.list();
+  return () => unsubscribe();
 }
 ```
 
@@ -475,14 +499,22 @@ type PluginTurnOutcome =
 
 ### Before hooks
 
-| Name                 | Request fields                                                          | Editable                                |
-| -------------------- | ----------------------------------------------------------------------- | --------------------------------------- |
-| `agent.create`       | `config`, optional `env`, optional read-only `labels`                   | Public agent config except `cwd`; `env` |
-| `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env` | Only `env`                              |
-| `workspace.create`   | `source`, optional `title`, `firstAgentContext`                         | Entire explicit creation request        |
+| Name                 | Request fields                                                               | Editable                                |
+| -------------------- | ---------------------------------------------------------------------------- | --------------------------------------- |
+| `agent.create`       | `config`, optional `env`, read-only `labels`, read-only `pluginDependencies` | Public agent config except `cwd`; `env` |
+| `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env`      | Only `env`                              |
+| `workspace.create`   | `source`, optional `title`, `firstAgentContext`                              | Entire explicit creation request        |
 
 The optional `agent.create.labels` map is copied from the caller's creation request. Plugins can
 inspect it to select their behavior, but cannot add, remove, or change labels.
+
+`pluginDependencies` is an optional list of runtime plugin IDs declared by the caller. The daemon
+checks every ID before creation and fails closed when one is not loaded. Hooks may inspect the list
+but cannot add, remove, or reorder it. The list is available on native `create_agent` calls and the
+SDK's `agents.create` options and CLI `--require-plugin <id>` flag, so a plugin launcher can carry
+one binding through every creation path. Added in v0.8.1. The SDK gates non-empty lists once on
+`server_info.features.pluginDependencies` and rejects an older host before sending the request.
+Raw protocol callers must perform that gate themselves. Omitting the field preserves ordinary creation.
 
 **`agent.create.config`** uses `AgentSessionConfig`:
 
@@ -1024,15 +1056,16 @@ export function DisplaySettings() {
 }
 ```
 
-| Component                          | Props and behavior                                                                                                                       |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `SettingsGroup`, `SettingsSection` | Required `title`, `children`; optional `info` tooltip, `trailing` content, `testID`. Own section spacing and headings.                   |
-| `SettingsCard`                     | `children`, optional `testID`. Owns the card surface and dividers between direct children. Give mapped rows stable React keys.           |
-| `SettingsRow`                      | Required `label`; optional `hint`, `error`, `children`, `testID`. Wrap any custom control or content.                                    |
-| `SettingsSwitch`                   | Row props plus required `value: boolean`, `onValueChange`; optional `disabled`.                                                          |
-| `SettingsSelect`                   | Row props plus required string `value`, `options: { label, value }[]`, `onValueChange`; optional `disabled`. Uses Paseo's adaptive menu. |
-| `SettingsInput`                    | Row props plus required `onChangeText`; optional `initialValue`, `placeholder`, `disabled`, `secureTextEntry`, `ref`.                    |
-| `SettingsAction`                   | Row props plus required `actionLabel`, `onPress`; optional `disabled`.                                                                   |
+| Component                          | Props and behavior                                                                                                                                                                                              |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SettingsGroup`, `SettingsSection` | Required `title`, `children`; optional `info` tooltip, `trailing` content, `testID`. Own section spacing and headings.                                                                                          |
+| `SettingsCard`                     | `children`, optional `testID`. Owns the card surface and dividers between direct children. Give mapped rows stable React keys.                                                                                  |
+| `SettingsRow`                      | Required `label`; optional `hint`, `error`, `children`, `testID`. Wrap any custom control or content.                                                                                                           |
+| `SettingsSwitch`                   | Row props plus required `value: boolean`, `onValueChange`; optional `disabled`.                                                                                                                                 |
+| `SettingsSelect`                   | Row props plus required string `value`, `options: { label, value }[]`, `onValueChange`; optional `disabled`. Uses Paseo's adaptive menu.                                                                        |
+| `ComposerSelect`                   | Compact composer trigger plus adaptive menu. Requires `label`, `value`, `options`, `onValueChange`, and a Lucide `icon`; supports `displayValue`, `message`, `messageTone`, `action`, `disabled`, and `testID`. |
+| `SettingsInput`                    | Row props plus required `onChangeText`; optional `initialValue`, `placeholder`, `disabled`, `secureTextEntry`, `ref`.                                                                                           |
+| `SettingsAction`                   | Row props plus required `actionLabel`, `onPress`; optional `disabled`.                                                                                                                                          |
 
 `SettingsInput` owns in-progress text. `initialValue` seeds it when mounted. Its ref exposes
 `focus()`, `blur()`, `getText()`, and `replaceText(text)` for explicit programmatic changes.
@@ -1465,6 +1498,57 @@ an action already in progress.
 `remove()` is idempotent. Updates after removal do nothing. Paseo removes outstanding buttons when
 the plugin installation or host connection is torn down. Return cleanup from the client entry for
 your subscriptions, timers, and other resources.
+
+## Draft composer contributions
+
+Added in v0.8.1. Require `requirements.paseo: ">=0.8.1"` when adopting this API.
+
+`client.addDraftComposer({ id, Component })` adds plugin-owned controls to New workspace and the
+ordinary workspace draft composer. Paseo renders the contribution beside the native provider,
+model, thinking, feature, and profile controls; the plugin must not duplicate those native pickers.
+The host supplies the provider catalog and scopes each contribution to its daemon connection.
+`workspaceId` is undefined before a workspace exists; never invent an ID for that context.
+
+```tsx
+import type {
+  PluginClientContext,
+  PluginDraftComposerProps,
+  PluginDraftComposerSelection,
+} from "@getpaseo/plugin/client";
+
+function RoleControls({ selection, onSelectionChange }: PluginDraftComposerProps) {
+  const chooseRole = (role: string) => {
+    const next: PluginDraftComposerSelection = {
+      ready: false,
+      profileIds: ["profile-1", "profile-2"],
+      labels: { "example.role": role },
+      dependencies: ["example-plugin"],
+      error: "Choose a compatible native profile.",
+    };
+    onSelectionChange(next);
+  };
+
+  return null; // Render a compact role control with Paseo's UI primitives.
+}
+
+export default function contribute(client: PluginClientContext) {
+  client.addDraftComposer({ id: "roles", Component: RoleControls });
+  return () => {};
+}
+```
+
+`selection.ready` controls submission. Keep it `false` while role intent, filters, or dependency
+checks are incomplete; Paseo retains those fields across remounts and plugin teardown. `profileIds`
+filters the existing native profile picker. Selecting a profile calls the component with the same
+profile identity, while model, thinking, and feature edits remain live draft values. A profile
+contains `id`, `provider`, and optional `modelId`, `modeId`, `thinkingOptionId`, and `featureValues`.
+`labels` and `dependencies` are merged across contributions; conflicting label values fail closed.
+The host supplies `selection`, `selectedProfileId`, `clearProfileSelection()`, and
+`onSelectionChange(next)`, plus workspace, available providers, theme, layout, and disabled state.
+Clear the profile when changing the plugin intent so another explicit native selection is required.
+Navigate to a plugin settings screen using `client.openSettings(screenId)` from the registration.
+An empty ready selection means ordinary creation. A removed or crashed contribution with plugin
+intent leaves the draft in an error state and never falls through to an ordinary launch.
 
 ## Use the Paseo SDK
 

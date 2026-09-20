@@ -96,6 +96,11 @@ import type {
 } from "@getpaseo/client/internal/daemon-client";
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { WorkspaceDraftTabSetup, WorkspaceTabTarget } from "@/workspace-tabs/model";
+import type { PluginDraftComposerSelection } from "@getpaseo/plugin/client";
+import { usePluginDraftComposers } from "@/plugins";
+import { usePluginDraftComposerState } from "@/plugins/draft-composer";
+import { PluginDraftComposerControls } from "@/plugins/draft-composer-view";
+import type { ResolvedDraftComposerSelection } from "@/plugins/draft-composer-core";
 import { isEmptyWorkspaceSubmission, runCreateEmptyWorkspace } from "./new-workspace-empty";
 import {
   getWorkspaceNamingAttachments,
@@ -133,6 +138,10 @@ import {
   createWorkspaceAgentInBackground,
 } from "./new-workspace/background-handoff";
 import { useNewWorkspaceScreenPresence } from "./new-workspace/screen-presence";
+import {
+  buildNewWorkspacePluginDraftId,
+  resolveNewWorkspacePluginSelection,
+} from "./new-workspace-plugin-binding";
 
 const ThemedFolderPlus = withUnistyles(FolderPlus);
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -777,6 +786,8 @@ interface SubmitDraftInput {
   attachments: ComposerAttachment[];
   provider: AgentProvider;
   composerState: NewWorkspaceComposerState;
+  pluginSelection?: PluginDraftComposerSelection;
+  clearPluginSelections: () => void;
   supportsForgeSearch: boolean;
   resolveClient: () => DaemonClient;
   isStillOnCreateScreen: () => boolean;
@@ -793,6 +804,7 @@ interface WorkspaceDraftSubmissionConfig {
   model: string | null;
   thinkingOptionId: string | null;
   featureValues: Record<string, unknown> | undefined;
+  pluginSelection?: PluginDraftComposerSelection;
   target: WorkspaceTabTarget;
 }
 
@@ -885,6 +897,9 @@ interface CreateChatAgentInput {
   clearDraft: (lifecycle: "sent" | "abandoned") => void;
   draftId?: string;
   draftContextScopeKey: string | null;
+  pluginSelection: ResolvedDraftComposerSelection | null;
+  pluginSelectionError: string | null;
+  clearPluginSelections: () => void;
   supportsForgeSearch: boolean;
   resolveClient: () => DaemonClient;
   isStillOnCreateScreen: () => boolean;
@@ -954,6 +969,11 @@ async function runCreateChatAgent(input: CreateChatAgentInput): Promise<SubmitOu
   if (!provider) {
     throw new Error(input.labels.selectModel);
   }
+  const pluginSelection = resolveNewWorkspacePluginSelection({
+    selection: input.pluginSelection,
+    selectionError: input.pluginSelectionError,
+    provider,
+  });
   const attachmentSubmitFormat = resolveComposerAttachmentSubmitFormat({
     supportsForgeAttachments: input.supportsForgeSearch,
   });
@@ -987,6 +1007,8 @@ async function runCreateChatAgent(input: CreateChatAgentInput): Promise<SubmitOu
     attachments,
     provider,
     composerState,
+    pluginSelection,
+    clearPluginSelections: input.clearPluginSelections,
     supportsForgeSearch: input.supportsForgeSearch,
     resolveClient: input.resolveClient,
     isStillOnCreateScreen: input.isStillOnCreateScreen,
@@ -1028,8 +1050,10 @@ function resolveWorkspaceDraftSubmissionConfig(input: {
   provider: AgentProvider;
   composerState: NewWorkspaceComposerState;
   initialSetup?: WorkspaceDraftTabSetup;
+  pluginSelection?: PluginDraftComposerSelection;
 }): WorkspaceDraftSubmissionConfig {
-  const { draftId, workspaceDirectory, provider, composerState, initialSetup } = input;
+  const { draftId, workspaceDirectory, provider, composerState, initialSetup, pluginSelection } =
+    input;
   if (initialSetup) {
     return {
       cwd: initialSetup.cwd,
@@ -1038,6 +1062,7 @@ function resolveWorkspaceDraftSubmissionConfig(input: {
       model: initialSetup.model,
       thinkingOptionId: initialSetup.thinkingOptionId,
       featureValues: initialSetup.featureValues,
+      pluginSelection,
       target: { kind: "draft", draftId, setup: initialSetup },
     };
   }
@@ -1048,6 +1073,7 @@ function resolveWorkspaceDraftSubmissionConfig(input: {
     model: composerState.effectiveModelId || null,
     thinkingOptionId: composerState.effectiveThinkingOptionId || null,
     featureValues: composerState.featureValues,
+    pluginSelection,
     target: { kind: "draft", draftId },
   };
 }
@@ -1079,6 +1105,7 @@ async function submitWorkspaceDraft(input: SubmitDraftInput): Promise<SubmitOutc
     provider,
     composerState,
     initialSetup,
+    pluginSelection: input.pluginSelection,
   });
   // Creation blocks on a slow daemon RPC. If the user moved on while it ran, the destination
   // screen's draft tab will never mount to issue create_agent, so this path does it instead.
@@ -1102,8 +1129,11 @@ async function submitWorkspaceDraft(input: SubmitDraftInput): Promise<SubmitOutc
           clientMessageId,
           ...(wirePayload.images.length > 0 ? { images: wirePayload.images } : {}),
           ...(wirePayload.attachments.length > 0 ? { attachments: wirePayload.attachments } : {}),
+          labels: submission.pluginSelection?.labels,
+          pluginDependencies: submission.pluginSelection?.dependencies,
         }),
     });
+    input.clearPluginSelections();
     return "background";
   }
 
@@ -1132,9 +1162,11 @@ async function submitWorkspaceDraft(input: SubmitDraftInput): Promise<SubmitOutc
     ...(submission.model ? { model: submission.model } : {}),
     ...(submission.thinkingOptionId ? { thinkingOptionId: submission.thinkingOptionId } : {}),
     ...(submission.featureValues ? { featureValues: submission.featureValues } : {}),
+    ...(submission.pluginSelection ? { pluginSelection: submission.pluginSelection } : {}),
     allowEmptyText: true,
   });
   clearDraft("sent");
+  input.clearPluginSelections();
   navigateToWorkspace({
     serverId,
     workspaceId,
@@ -1738,6 +1770,32 @@ export function NewWorkspaceScreen({
     }),
   });
   const composerState = chatDraft.composerState;
+  const draftPluginEntries = usePluginDraftComposers(selectedServerId);
+  const newWorkspacePluginDraftId = useMemo(
+    () =>
+      buildNewWorkspacePluginDraftId({
+        draftId,
+        serverId: selectedServerId,
+        projectViewKey: selectedProject?.viewKey ?? selectedSourceDirectory,
+      }),
+    [draftId, selectedProject, selectedServerId, selectedSourceDirectory],
+  );
+  const {
+    isHydrated: draftPluginSelectionsHydrated,
+    selections: draftPluginSelections,
+    selectedProfileId: nativeProfileId,
+    setSelectedProfileId: setNativeProfileId,
+    recordSelection: recordDraftPluginSelection,
+    clearProfileSelection: clearNativeProfileSelection,
+    invalidateForProvider: invalidateDraftPluginBindingsForProvider,
+    clearSelections: clearDraftPluginSelections,
+    selection: draftPluginSelection,
+    selectionError: draftPluginSelectionError,
+  } = usePluginDraftComposerState({
+    draftId: newWorkspacePluginDraftId,
+    entries: draftPluginEntries,
+    pendingSelection: undefined,
+  });
   const [pickerSelection, dispatchPickerSelection] = useReducer(
     reducePickerSelection,
     initialPickerSelectionState,
@@ -2136,6 +2194,9 @@ export function NewWorkspaceScreen({
           draftKey,
           draftId,
           draftContextScopeKey,
+          pluginSelection: draftPluginSelection,
+          pluginSelectionError: draftPluginSelectionError,
+          clearPluginSelections: clearDraftPluginSelections,
           supportsForgeSearch,
           resolveClient: withConnectedClient,
           isStillOnCreateScreen,
@@ -2158,6 +2219,9 @@ export function NewWorkspaceScreen({
       composerState,
       draftContextScopeKey,
       draftId,
+      draftPluginSelection,
+      draftPluginSelectionError,
+      clearDraftPluginSelections,
       chatDraft.clear,
       draftKey,
       ensureWorkspace,
@@ -2287,15 +2351,64 @@ export function NewWorkspaceScreen({
     [isCompact, insets.bottom],
   );
 
+  const handleSelectProviderAndModel = useCallback(
+    (provider: AgentProvider, modelId: string) => {
+      invalidateDraftPluginBindingsForProvider(provider);
+      composerState?.setProviderAndModelFromUser(provider, modelId);
+    },
+    [composerState, invalidateDraftPluginBindingsForProvider],
+  );
+
   const agentControlsWithDisabled = useMemo(
     () =>
       composerState
         ? {
             ...composerState.agentControls,
+            onSelectProviderAndModel: handleSelectProviderAndModel,
+            onProfileSelected: setNativeProfileId,
+            profileIds: draftPluginSelection?.profileIds,
             disabled: isPending,
           }
         : undefined,
-    [composerState, isPending],
+    [
+      composerState,
+      draftPluginSelection,
+      handleSelectProviderAndModel,
+      isPending,
+      setNativeProfileId,
+    ],
+  );
+
+  const draftComposerControls = useMemo(
+    () => (
+      <PluginDraftComposerControls
+        isHydrated={draftPluginSelectionsHydrated}
+        entries={draftPluginEntries}
+        serverId={selectedServerId}
+        workspaceId={undefined}
+        draftBindingKey={newWorkspacePluginDraftId}
+        cwd={composerState?.workingDir ?? selectedSourceDirectory ?? ""}
+        availableProviders={composerState?.modelSelectorProviders.map((entry) => entry.id) ?? []}
+        disabled={isPending}
+        selections={draftPluginSelections}
+        selectedProfileId={nativeProfileId}
+        clearProfileSelection={clearNativeProfileSelection}
+        onSelectionChange={recordDraftPluginSelection}
+      />
+    ),
+    [
+      clearNativeProfileSelection,
+      composerState,
+      draftPluginEntries,
+      draftPluginSelections,
+      draftPluginSelectionsHydrated,
+      isPending,
+      nativeProfileId,
+      newWorkspacePluginDraftId,
+      recordDraftPluginSelection,
+      selectedServerId,
+      selectedSourceDirectory,
+    ],
   );
 
   const pickerEmptyText =
@@ -2435,6 +2548,8 @@ export function NewWorkspaceScreen({
               autoFocusKey={launchFocusKey}
               commandDraftConfig={composerState?.commandDraftConfig}
               agentControls={agentControlsWithDisabled}
+              draftComposerControls={draftComposerControls}
+              isCompactLayout={isCompact}
             />
           )}
           {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}

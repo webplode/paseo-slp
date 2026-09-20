@@ -33,6 +33,33 @@ test("agent.create hooks can inspect caller labels", async () => {
   });
 });
 
+test("agent.create hooks can inspect declared plugin dependencies", async () => {
+  const handlers = new PluginHookHandlers(() => undefined);
+  let seen: readonly string[] | undefined;
+
+  handlers.before("agent.create", ({ request }) => {
+    seen = request.pluginDependencies;
+    return request;
+  });
+
+  const result = await handlers.invoke(
+    "request-dependency",
+    "before",
+    "agent.create",
+    {
+      config: { provider: "codex", cwd: "/tmp/project" },
+      pluginDependencies: ["slp"],
+    },
+    paseo,
+  );
+
+  expect(seen).toEqual(["slp"]);
+  expect(result).toEqual({
+    config: { provider: "codex", cwd: "/tmp/project" },
+    pluginDependencies: ["slp"],
+  });
+});
+
 test.each([
   ["add", { "plugin.profile": "review", "plugin.extra": "value" }],
   ["remove", {}],
@@ -62,4 +89,18 @@ test("agent.create hooks cannot add labels when none were supplied", () => {
       labels: { "plugin.profile": "review" },
     }),
   ).toThrow("agent.create hooks cannot change labels");
+});
+
+test("agent.create hooks cannot change plugin dependencies", () => {
+  const input = validateBeforeRequest("agent.create", {
+    config: { provider: "codex", cwd: "/tmp/project" },
+    pluginDependencies: ["slp"],
+  });
+
+  expect(() =>
+    validateBeforeResult("agent.create", input, {
+      ...input,
+      pluginDependencies: ["other-plugin"],
+    }),
+  ).toThrow("agent.create hooks cannot change plugin dependencies");
 });

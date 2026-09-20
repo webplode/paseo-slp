@@ -19,6 +19,7 @@ import { useAgentProfiles } from "./use-agent-profiles";
 /** The draft composer owns profile application as one state transition. */
 export interface DraftAgentProfileControls {
   applyProfile: (profile: MaterializedAgentProfile) => void;
+  onProfileSelected?: (profileId: string) => void;
 }
 
 export type AgentProfileApplyTarget =
@@ -53,6 +54,8 @@ export interface UseAgentProfilePickerInput {
    * the draft form ignores a provider the host does not offer.
    */
   availableProviders: readonly string[];
+  /** Optional host/plugin filter. Undefined keeps the ordinary full catalog. */
+  profileIds?: readonly string[];
   target: AgentProfileApplyTarget;
 }
 
@@ -65,7 +68,7 @@ export interface UseAgentProfilePickerInput {
 export function useAgentProfilePicker(
   input: UseAgentProfilePickerInput,
 ): AgentProfilePicker | null {
-  const { serverId, availableProviders, target } = input;
+  const { serverId, availableProviders, profileIds, target } = input;
   const { t } = useTranslation();
   const { profiles, isSupported } = useAgentProfiles(serverId);
   // Profiles are host config, so their labels read from the host-wide catalog
@@ -81,8 +84,12 @@ export function useAgentProfilePicker(
       return [];
     }
     const available = new Set(availableProviders);
-    return profiles.filter((profile) => available.has(profile.provider));
-  }, [availableProviders, isSupported, profiles]);
+    const allowedIds = profileIds ? new Set(profileIds) : null;
+    return profiles.filter(
+      (profile) =>
+        available.has(profile.provider) && (allowedIds === null || allowedIds.has(profile.id)),
+    );
+  }, [availableProviders, isSupported, profileIds, profiles]);
 
   const formatFeatureCount = useCallback(
     (count: number) =>
@@ -138,6 +145,7 @@ export function useAgentProfilePicker(
 
       if (target.kind === "draft") {
         target.controls.applyProfile(resolved);
+        target.controls.onProfileSelected?.(profileId);
         return;
       }
 

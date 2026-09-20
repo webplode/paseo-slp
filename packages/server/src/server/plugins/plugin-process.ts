@@ -231,13 +231,17 @@ function evaluateBundle(bundle: string): void {
   if (typeof setup !== "function") {
     throw new Error("Plugin server bundle must default export a function");
   }
-  const contributedCleanup = setup({
-    handle: register,
-    registerProvider,
-    registerSettings,
-    on: hooks.on,
-    before: hooks.before,
-  });
+  if (!paseo) throw new Error("Plugin Paseo API is unavailable during activation");
+  const contributedCleanup = setup(
+    {
+      handle: register,
+      registerProvider,
+      registerSettings,
+      on: hooks.on,
+      before: hooks.before,
+    },
+    { paseo },
+  );
   if (typeof contributedCleanup !== "function") {
     throw new Error("Plugin contribution must return a cleanup function");
   }

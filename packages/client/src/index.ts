@@ -238,6 +238,7 @@ export interface PaseoAgentCreateOptions {
   autoArchive?: CreateAgentRequestMessage["autoArchive"];
   requestId?: string;
   labels?: Record<string, string>;
+  pluginDependencies?: readonly string[];
 }
 
 export type PaseoWorkspaceAgentCreateOptions = Omit<PaseoAgentCreateOptions, "cwd">;

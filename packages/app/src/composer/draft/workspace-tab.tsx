@@ -31,7 +31,7 @@ import {
   shouldAllowEmptyDraftText,
   validateDraftSubmission,
 } from "@/composer/draft/workspace-tab-core";
-import type { AgentCapabilityFlags } from "@getpaseo/protocol/agent-types";
+import type { AgentCapabilityFlags, AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { WorkspaceComposerAttachment } from "@/attachments/types";
@@ -53,6 +53,9 @@ import {
 } from "@/workspace-tabs/model";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
 import { useSettings } from "@/hooks/use-settings";
+import { usePluginDraftComposers } from "@/plugins";
+import { PluginDraftComposerControls } from "@/plugins/draft-composer-view";
+import { usePluginDraftComposerState } from "@/plugins/draft-composer";
 
 const EMPTY_PENDING_PERMISSIONS = new Map();
 const DRAFT_CAPABILITIES: AgentCapabilityFlags = {
@@ -70,6 +73,28 @@ interface AutoSubmitConfig {
   model: string | null;
   thinkingOptionId: string | null;
   featureValues: Record<string, unknown>;
+}
+
+interface DraftPluginSubmission {
+  dependencies?: readonly string[];
+  labels?: Readonly<Record<string, string>>;
+  profile?: {
+    id: string;
+    provider: string;
+    modelId?: string;
+    modeId?: string;
+    thinkingOptionId?: string;
+    featureValues?: Record<string, unknown>;
+  };
+}
+
+function assertDraftPluginProvider(
+  selection: DraftPluginSubmission | null,
+  provider: string,
+): void {
+  if (selection?.profile && selection.profile.provider !== provider) {
+    throw new Error("The selected plugin profile no longer matches the provider. Choose it again.");
+  }
 }
 
 function resolveAutoSubmitConfig(
@@ -145,6 +170,7 @@ async function submitDraftCreateRequest(input: {
   workspaceDirectory: string | null;
   workspaceId: string | null;
   autoSubmitConfig: AutoSubmitConfig | null;
+  pluginSelection: DraftPluginSubmission | null;
   composerState: {
     selectedProvider: string | null;
     selectedMode: string;
@@ -166,6 +192,7 @@ async function submitDraftCreateRequest(input: {
     workspaceDirectory,
     workspaceId,
     autoSubmitConfig,
+    pluginSelection,
     composerState,
   } = input;
 
@@ -179,6 +206,7 @@ async function submitDraftCreateRequest(input: {
   if (!provider) {
     throw new Error(input.selectModelMessage);
   }
+  assertDraftPluginProvider(pluginSelection, provider);
   const modeIdOverride = resolveDraftModeIdOverride({
     autoSubmitConfig,
     modeOptionIds: composerState.modeOptions.map((mode) => mode.id),
@@ -202,6 +230,8 @@ async function submitDraftCreateRequest(input: {
     clientMessageId: attempt.clientMessageId,
     ...(images ? { images } : {}),
     ...(attachmentsArray ? { attachments: attachmentsArray } : {}),
+    labels: pluginSelection?.labels,
+    pluginDependencies: pluginSelection?.dependencies,
   });
 
   return {
@@ -216,6 +246,7 @@ function buildDraftAgentSnapshot(input: {
   tabId: string;
   workspaceDirectory: string | null;
   autoSubmitConfig: AutoSubmitConfig | null;
+  pluginSelection: DraftPluginSubmission | null;
   composerState: {
     effectiveModelId: string | null;
     effectiveThinkingOptionId: string | null;
@@ -226,7 +257,15 @@ function buildDraftAgentSnapshot(input: {
   };
   selectModelMessage: string;
 }): Agent {
-  const { attempt, serverId, tabId, workspaceDirectory, autoSubmitConfig, composerState } = input;
+  const {
+    attempt,
+    serverId,
+    tabId,
+    workspaceDirectory,
+    autoSubmitConfig,
+    pluginSelection,
+    composerState,
+  } = input;
   invariant(workspaceDirectory, "Workspace directory is required");
   const now = attempt.timestamp;
   const model = autoSubmitConfig?.model ?? (composerState.effectiveModelId || null);
@@ -241,6 +280,7 @@ function buildDraftAgentSnapshot(input: {
   if (!provider) {
     throw new Error(input.selectModelMessage);
   }
+  assertDraftPluginProvider(pluginSelection, provider);
   return {
     serverId,
     id: tabId,
@@ -263,7 +303,7 @@ function buildDraftAgentSnapshot(input: {
     features: composerState.agentControls.features,
     thinkingOptionId,
     parentAgentId: null,
-    labels: {},
+    labels: pluginSelection?.labels ?? {},
   };
 }
 
@@ -373,6 +413,8 @@ export function WorkspaceDraftAgentTab({
   const draftFeatures = composerState.agentControls.features;
   const draftOnSetFeature = composerState.agentControls.onSetFeature;
 
+  const draftPluginEntries = usePluginDraftComposers(serverId);
+
   const clearDraftInput = draftInput.clear;
   const replaceDraftText = draftInput.replaceText;
   const setDraftAttachments = draftInput.setAttachments;
@@ -388,6 +430,22 @@ export function WorkspaceDraftAgentTab({
     (state) => state.consumePending,
   );
   const autoSubmitConfig = resolveAutoSubmitConfig(pendingAutoSubmit);
+  const {
+    isHydrated: draftPluginSelectionsHydrated,
+    selections: draftPluginSelections,
+    selectedProfileId: nativeProfileId,
+    setSelectedProfileId: setNativeProfileId,
+    recordSelection: recordDraftPluginSelection,
+    clearProfileSelection: clearNativeProfileSelection,
+    invalidateForProvider: invalidateDraftPluginBindingsForProvider,
+    clearSelections: clearDraftPluginSelections,
+    selection: draftPluginSelection,
+    selectionError: draftPluginSelectionError,
+  } = usePluginDraftComposerState({
+    draftId,
+    entries: draftPluginEntries,
+    pendingSelection: pendingAutoSubmit?.pluginSelection,
+  });
   const initialCreateAttempt = useMemo<DraftCreateAttempt | null>(() => {
     if (!pendingAutoSubmit || !pendingCreateAttempt) {
       return null;
@@ -460,6 +518,9 @@ export function WorkspaceDraftAgentTab({
         allowsEmptyAutoSubmit,
         attachments,
       });
+      if (draftPluginSelectionError) {
+        return draftPluginSelectionError;
+      }
       return validateDraftSubmission({
         text,
         allowsEmptyAutoSubmit: allowsEmptyDraftText,
@@ -483,6 +544,7 @@ export function WorkspaceDraftAgentTab({
         tabId,
         workspaceDirectory: draftWorkingDirectory,
         autoSubmitConfig,
+        pluginSelection: draftPluginSelection,
         composerState,
         selectModelMessage: t("workspaceSetup.errors.selectModel"),
       }),
@@ -497,6 +559,7 @@ export function WorkspaceDraftAgentTab({
         workspaceDirectory: draftWorkingDirectory,
         workspaceId: workspaceFields?.id ?? null,
         autoSubmitConfig,
+        pluginSelection: draftPluginSelection,
         composerState,
         hostDisconnectedMessage: t("workspace.terminal.hostDisconnected"),
         selectModelMessage: t("workspaceSetup.errors.selectModel"),
@@ -505,6 +568,7 @@ export function WorkspaceDraftAgentTab({
       clearDraftInput("sent");
       clearWorkspaceAttachments({ scopeKey: draftAttachmentScopeKey });
       useWorkspaceDraftSubmissionStore.getState().clearDraftSetup({ draftId });
+      clearDraftPluginSelections();
       onCreated(result);
     },
   });
@@ -612,13 +676,62 @@ export function WorkspaceDraftAgentTab({
     focusInputRef.current?.();
   }, []);
   const importPillPress = resolveImportPillPress(onOpenImportSheet, isSubmitting);
+  const handleSelectProviderAndModel = useCallback(
+    (provider: AgentProvider, modelId: string) => {
+      invalidateDraftPluginBindingsForProvider(provider);
+      composerState.setProviderAndModelFromUser(provider, modelId);
+    },
+    [composerState, invalidateDraftPluginBindingsForProvider],
+  );
   const composerAgentControls = useMemo(
     () => ({
       ...composerState.agentControls,
+      onSelectProviderAndModel: handleSelectProviderAndModel,
+      onProfileSelected: setNativeProfileId,
+      profileIds: draftPluginSelection?.profileIds,
       onDropdownClose: handleDropdownCloseFocus,
       disabled: isSubmitting,
     }),
-    [composerState.agentControls, handleDropdownCloseFocus, isSubmitting],
+    [
+      composerState.agentControls,
+      draftPluginSelection?.profileIds,
+      handleDropdownCloseFocus,
+      handleSelectProviderAndModel,
+      isSubmitting,
+      setNativeProfileId,
+    ],
+  );
+  const draftComposerControls = useMemo(
+    () => (
+      <PluginDraftComposerControls
+        isHydrated={draftPluginSelectionsHydrated}
+        entries={draftPluginEntries}
+        serverId={serverId}
+        workspaceId={workspaceId}
+        draftBindingKey={draftId}
+        cwd={composerState.workingDir}
+        availableProviders={composerState.modelSelectorProviders.map((entry) => entry.id)}
+        disabled={isSubmitting}
+        selections={draftPluginSelections}
+        selectedProfileId={nativeProfileId}
+        clearProfileSelection={clearNativeProfileSelection}
+        onSelectionChange={recordDraftPluginSelection}
+      />
+    ),
+    [
+      clearNativeProfileSelection,
+      composerState.modelSelectorProviders,
+      composerState.workingDir,
+      draftId,
+      draftPluginEntries,
+      draftPluginSelections,
+      draftPluginSelectionsHydrated,
+      isSubmitting,
+      nativeProfileId,
+      recordDraftPluginSelection,
+      serverId,
+      workspaceId,
+    ],
   );
   return (
     <FileDropZone style={styles.container}>
@@ -680,6 +793,7 @@ export function WorkspaceDraftAgentTab({
           onFocusInput={handleFocusInputCallback}
           commandDraftConfig={composerState.commandDraftConfig}
           agentControls={composerAgentControls}
+          draftComposerControls={draftComposerControls}
           isCompactLayout={isCompactComposerLayout}
         />
       </KeyboardTranslateView>

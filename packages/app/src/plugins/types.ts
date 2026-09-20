@@ -7,6 +7,7 @@ import type {
 } from "@getpaseo/plugin";
 import type {
   PluginCommandCenterItemContribution,
+  PluginDraftComposerContribution,
   PluginClientSlashCommandContribution,
   PluginComposerPillContribution,
   PluginSidebarContribution,
@@ -28,6 +29,8 @@ export interface EvaluatedPlugin {
   surfaces: PluginSurfaceContribution[];
   settingsScreens: PluginSettingsScreenContribution[];
   sidebarItems: PluginSidebarContribution[];
+  /** Optional for hosts/tests that materialize older plugin snapshots. */
+  draftComposers?: PluginDraftComposerContribution[];
   workspacePanels: EvaluatedPluginWorkspacePanelContribution[];
   commandCenterItems: PluginCommandCenterItemContribution[];
   clientSlashCommands: PluginClientSlashCommandContribution[];
@@ -56,4 +59,5 @@ export type {
   PluginTimelineRendererContribution,
   PluginTimelineTransformerContribution,
   PluginWorkspacePanelContribution,
+  PluginDraftComposerContribution,
 };

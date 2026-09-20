@@ -75,6 +75,12 @@ export function addRunOptions(cmd: Command): Command {
         [],
       )
       .option(
+        "--require-plugin <id>",
+        "Require a loaded plugin for this creation (can be used multiple times)",
+        collectMultiple,
+        [],
+      )
+      .option(
         "--wait-timeout <duration>",
         "Maximum time to wait for agent to finish (e.g., 30s, 5m, 1h). Default: no limit",
       )
@@ -129,6 +135,7 @@ export interface AgentRunOptions extends CommandOptions {
   cwd?: string;
   env?: string[];
   label?: string[];
+  requirePlugin?: string[];
   waitTimeout?: string;
   outputSchema?: string;
 }
@@ -383,6 +390,16 @@ function validateRunOptions(prompt: string, options: AgentRunOptions, outputSche
   }
 
   validateRunWorkspaceOptions(options);
+
+  if (
+    options.requirePlugin?.some((id) => !id.trim()) ||
+    (options.requirePlugin?.length ?? 0) > 32
+  ) {
+    throw {
+      code: "INVALID_OPTIONS",
+      message: "--require-plugin expects up to 32 non-empty plugin IDs",
+    } satisfies CommandError;
+  }
 
   if (outputSchema && runsInBackground(options)) {
     throw {
@@ -642,6 +659,7 @@ export async function runRunCommand(
             images,
             env: requestEnv,
             labels: Object.keys(labels).length > 0 ? labels : undefined,
+            pluginDependencies: options.requirePlugin,
           });
         } else {
           await client.sendMessage(structuredAgent.id, structuredPrompt);
@@ -712,6 +730,7 @@ export async function runRunCommand(
       images,
       env: requestEnv,
       labels: Object.keys(labels).length > 0 ? labels : undefined,
+      pluginDependencies: options.requirePlugin,
     });
 
     // Default run behavior is foreground: wait for completion unless background execution is set.

@@ -483,6 +483,7 @@ export interface SessionOptions {
   pluginRuntime?: {
     before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
+    assertDependencies: import("./plugins/lifecycle/index.js").PluginLifecycle["assertDependencies"];
     listPlugins(): import("@getpaseo/protocol/messages").PluginListItem[];
     getLogs(pluginId: string): import("@getpaseo/protocol/messages").PluginLogEntry[];
     installDirectory(input: {
@@ -3641,6 +3642,7 @@ export class Session {
       images,
       attachments,
       env,
+      pluginDependencies,
     } = msg;
     this.sessionLogger.info(
       { cwd: config.cwd, provider: config.provider, worktreeName },
@@ -3708,6 +3710,7 @@ export class Session {
           attachments,
           git,
           labels: resolvedIntent.intent.labels,
+          pluginDependencies,
           env,
           provisionalTitle,
           firstAgentContext,

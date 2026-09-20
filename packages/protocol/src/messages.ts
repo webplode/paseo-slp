@@ -1689,6 +1689,9 @@ export const CreateAgentRequestMessageSchema = z.object({
   // Optional caller context lets managed CLI invocations use the same daemon-owned
   // workspace and parentage policy as agent-scoped MCP creation.
   callerAgentId: z.string().optional(),
+  // Declared plugin dependencies are checked by the daemon before a session is created.
+  // The field is optional for ordinary callers and remains wire-compatible with older clients.
+  pluginDependencies: z.array(z.string().min(1)).max(32).optional(),
   worktreeName: z.string().optional(),
   initialPrompt: z.string().optional(),
   clientMessageId: z.string().optional(),
@@ -3434,6 +3437,9 @@ export const ServerInfoStatusPayloadSchema = z
       .object({
         // COMPAT(agentRequestReceipts): added in v0.8.0; remove gate after 2027-03-05.
         agentRequestReceipts: z.boolean().optional(),
+        // COMPAT(pluginDependencies): added in v0.8.1; remove gate after 2027-09-16.
+        // A declared plugin dependency must never be silently ignored by an older daemon.
+        pluginDependencies: z.boolean().optional(),
         // COMPAT(hubAgentRpc): added in v0.8.0; remove gate after 2027-03-05.
         hubAgentRpc: z.boolean().optional(),
         providersSnapshot: z.boolean().optional(),

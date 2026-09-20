@@ -285,6 +285,7 @@ type ProviderClientMap = Partial<Record<AgentProvider, AgentClient>>;
 
 export interface CreateAgentOptions {
   labels?: Record<string, string>;
+  pluginDependencies?: readonly string[];
   initialPrompt?: string;
   env?: Record<string, string>;
   persistSession?: boolean;
@@ -1226,12 +1227,21 @@ export class AgentManager {
     options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    if (
+      options.pluginDependencies &&
+      options.pluginDependencies.length > 0 &&
+      !this.pluginLifecycle
+    ) {
+      throw new Error("Declared plugin dependencies cannot be checked on this host");
+    }
+    this.pluginLifecycle?.assertDependencies(options.pluginDependencies);
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
     // A no-native-handle restore already has the persisted result of creation hooks.
     if (this.pluginLifecycle && !config.internal && options.restoreStoredConfig !== true) {
       const request = await this.pluginLifecycle.before("agent.create", {
         config,
         env: options.env,
+        pluginDependencies: options.pluginDependencies,
         labels: options.labels ? { ...options.labels } : undefined,
       });
       config = { ...request.config, internal: config.internal };

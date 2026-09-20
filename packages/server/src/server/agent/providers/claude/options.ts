@@ -74,6 +74,7 @@ export const ClaudeProviderOptionsSchema = z
       .optional(),
     settings: z
       .object({
+        env: z.record(z.string(), z.string()).optional(),
         permissions: PermissionRulesSchema.optional(),
         sandbox: z
           .object({

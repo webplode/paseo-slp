@@ -29,7 +29,10 @@ export const beforeHookNames = ["agent.create", "agent.session_open", "workspace
 
 const beforeSchemas = {
   "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true })
-    .extend({ labels: z.record(z.string(), z.string()).optional() })
+    .extend({
+      labels: z.record(z.string(), z.string()).optional(),
+      pluginDependencies: z.array(z.string().min(1)).max(32).optional(),
+    })
     .strict(),
   "agent.session_open": z
     .object({
@@ -54,6 +57,8 @@ export interface PluginLifecycle {
     name: Name,
     request: PluginBeforeRequests[Name],
   ): Promise<PluginBeforeRequests[Name]>;
+  /** Reject a declared dependency if its plugin is not currently loaded. */
+  assertDependencies(dependencies?: readonly string[]): void;
 }
 
 export function validateBeforeRequest<Name extends keyof PluginBeforeRequests>(
@@ -160,8 +165,20 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
     if (!sameStringRecord(previous.labels, next.labels)) {
       throw new Error("agent.create hooks cannot change labels");
     }
+    if (!sameStringArray(previous.pluginDependencies, next.pluginDependencies)) {
+      throw new Error("agent.create hooks cannot change plugin dependencies");
+    }
   }
   return result;
+}
+
+function sameStringArray(
+  previous: readonly string[] | undefined,
+  next: readonly string[] | undefined,
+): boolean {
+  if (previous === next) return true;
+  if (!previous || !next || previous.length !== next.length) return false;
+  return previous.every((value, index) => value === next[index]);
 }
 
 function sameStringRecord(

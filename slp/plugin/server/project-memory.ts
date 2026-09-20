@@ -1,10 +1,11 @@
 import { lstat, lstatSync, realpath, writeFile } from "node:fs";
 import { promisify } from "node:util";
 import path from "node:path";
-import type { RpcInput } from "@getpaseo/plugin";
-import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { bootstrapProjectMemoryRpc, inspectProjectMemoryRpc } from "../shared/project-memory";
+import type { PluginServerActivationContext } from "@getpaseo/plugin/server";
 import type { Role } from "../shared/roles";
+
+type PaseoApi = PluginServerActivationContext["paseo"];
+type PaseoProject = Awaited<ReturnType<PaseoApi["projects"]["list"]>>["projects"][number];
 
 export const workspaceProtocolName = "WORKSPACE_PROTOCOL.md";
 export const supervisorNotebookName = "SUPERVISOR_NOTEBOOK.md";
@@ -12,6 +13,29 @@ export const supervisorNotebookName = "SUPERVISOR_NOTEBOOK.md";
 const lstatAsync = promisify(lstat);
 const realpathAsync = promisify(realpath);
 const writeFileAsync = promisify(writeFile);
+
+export interface ProjectMemoryFile {
+  path: string;
+  status: "ready" | "missing" | "blocked";
+}
+
+export interface ProjectMemorySnapshot {
+  projectRoot: string;
+  protocol: ProjectMemoryFile;
+  notebook: ProjectMemoryFile;
+}
+
+export interface ProjectMemoryBootstrapResult {
+  snapshot: ProjectMemorySnapshot;
+  created: Array<typeof workspaceProtocolName | typeof supervisorNotebookName>;
+}
+
+export interface ProjectMemoryBootstrapRegistration {
+  ready: Promise<void>;
+  cleanup(): Promise<void>;
+}
+
+type ProjectLookupApi = Pick<PaseoApi, "projects" | "workspaces">;
 
 function inline(value: string): string {
   return value.replaceAll("`", "'").replaceAll("\n", " ").trim();
@@ -22,17 +46,20 @@ function workspaceProtocolTemplate(projectRoot: string): string {
   return `# Workspace Protocol — ${projectName}
 
 Owner: Human project owner. Version: 1. Applies to: \`${inline(projectRoot)}\`.
-Readers: Lead; Supervisor only when asked to audit or improve this protocol.
+Readers: Lead, Peer, and Supervisor after \`$PASEO_HOME/workspace_protocol.md\`.
 
-- Risk and protected areas: unclassified. Lead reads existing repository instructions and current bytes before mutation.
-- Default topology: Lead handles an exact tiny task or delegates the smallest useful Peer set when independent judgment is needed.
-- Ownership: one writer owns each moving or coupled scope; concurrent writers use separate worktrees.
-- Routing: discover available profiles, providers, models, modes, and budgets before pinning one assignment; do not silently substitute.
-- Evidence: inspect the current diff and focused verification; lifecycle status and a passing test are not project acceptance.
-- Escalation: use REOPEN_REQUEST, DEPENDENCY_REQUEST, or BLOCKED with evidence and the exact decision needed.
-- Human decisions: Human keeps product, portfolio, cost, external-effect, security, data-loss, and irreversible decisions.
-- Repository anti-patterns: none recorded yet. Add one only after a reproduced project-specific failure and include a review/removal trigger.
-- Evolution: Supervisor records novel or materially stronger causal evidence in \`${supervisorNotebookName}\`; it proposes protocol changes and never applies its own proposal while merely observing.
+This file holds only repository-specific tactics. It supplements the global contract and assignments.
+
+- Scope and user outcome: unclassified.
+- Risk and protected areas: unclassified; read existing repository instructions and current bytes before mutation.
+- Architecture and design delta: none recorded.
+- Ownership hotspots and shared contracts: none recorded.
+- Routing delta: none recorded.
+- Evidence and acceptance delta: current diff plus focused verification; add observable product proof when the outcome requires it.
+- Tests and operations: use the repository's existing focused commands; serialize shared or heavy resources.
+- Tracking and status source: current assignment and Git evidence; no issue tracker selected.
+- Repository anti-patterns: none recorded.
+- Evolution: record causal evidence in \`${supervisorNotebookName}\`; propose the smallest local rule with a review or removal trigger.
 `;
 }
 
@@ -73,7 +100,10 @@ No material records yet.
 async function state(filePath: string) {
   try {
     const stats = await lstatAsync(filePath);
-    return { path: filePath, status: stats.isFile() ? ("ready" as const) : ("blocked" as const) };
+    return {
+      path: filePath,
+      status: stats.isFile() ? ("ready" as const) : ("blocked" as const),
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { path: filePath, status: "missing" as const };
@@ -82,50 +112,58 @@ async function state(filePath: string) {
   }
 }
 
-async function resolveProjectRoot(
-  workspaceId: string,
-  { paseo }: PluginHandlerContext,
-): Promise<string> {
-  const workspace = await paseo.workspaces.ref(workspaceId).refresh();
-  if (!workspace?.projectRootPath) {
-    throw new Error(`Workspace ${workspaceId} is unavailable or has no project root.`);
+async function resolveProjectRootPath(projectRootPath: string): Promise<string> {
+  let root: string;
+  try {
+    root = await realpathAsync(projectRootPath);
+  } catch (error) {
+    throw new Error(`Registered project root is unavailable: ${projectRootPath}`, { cause: error });
   }
-  return realpathAsync(workspace.projectRootPath);
+  let stats;
+  try {
+    stats = await lstatAsync(root);
+  } catch (error) {
+    throw new Error(`Registered project root is unavailable: ${projectRootPath}`, { cause: error });
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`Registered project root is not a directory: ${projectRootPath}`);
+  }
+  return root;
 }
 
-async function snapshot(workspaceId: string, projectRoot: string) {
+async function snapshot(projectRoot: string): Promise<ProjectMemorySnapshot> {
   const protocolPath = path.join(projectRoot, workspaceProtocolName);
   const notebookPath = path.join(projectRoot, supervisorNotebookName);
   const [protocol, notebook] = await Promise.all([state(protocolPath), state(notebookPath)]);
-  return { workspaceId, projectRoot, protocol, notebook };
-}
-
-export async function inspectProjectMemory(
-  { workspaceId }: RpcInput<typeof inspectProjectMemoryRpc>,
-  context: PluginHandlerContext,
-) {
-  const root = await resolveProjectRoot(workspaceId, context);
-  return snapshot(workspaceId, root);
+  return { projectRoot, protocol, notebook };
 }
 
 async function createMissing(filePath: string, content: string): Promise<boolean> {
   try {
-    await writeFileAsync(filePath, content, { encoding: "utf8", flag: "wx", mode: 0o644 });
+    await writeFileAsync(filePath, content, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o644,
+    });
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw error;
+    throw new Error(`Unable to bootstrap project memory file ${filePath}`, {
+      cause: error,
+    });
   }
 }
 
 export async function bootstrapProjectMemory(
-  { workspaceId }: RpcInput<typeof bootstrapProjectMemoryRpc>,
-  context: PluginHandlerContext,
-) {
-  const root = await resolveProjectRoot(workspaceId, context);
-  const before = await snapshot(workspaceId, root);
+  projectRootPath: string,
+): Promise<ProjectMemoryBootstrapResult> {
+  const root = await resolveProjectRootPath(projectRootPath);
+  const before = await snapshot(root);
   if (before.protocol.status === "blocked" || before.notebook.status === "blocked") {
-    throw new Error("Project memory path exists but is not a regular file.");
+    const blocked = [before.protocol, before.notebook].find((file) => file.status === "blocked");
+    throw new Error(
+      `Project memory path is blocked or not a regular file: ${blocked?.path ?? root}`,
+    );
   }
   const created: Array<typeof workspaceProtocolName | typeof supervisorNotebookName> = [];
   if (
@@ -140,7 +178,14 @@ export async function bootstrapProjectMemory(
   ) {
     created.push(supervisorNotebookName);
   }
-  return { snapshot: await snapshot(workspaceId, root), created };
+  const after = await snapshot(root);
+  if (after.protocol.status === "blocked" || after.notebook.status === "blocked") {
+    const blocked = [after.protocol, after.notebook].find((file) => file.status === "blocked");
+    throw new Error(
+      `Project memory path is blocked or not a regular file: ${blocked?.path ?? root}`,
+    );
+  }
+  return { snapshot: after, created };
 }
 
 function fileStatus(filePath: string): "ready" | "missing" | "blocked" {
@@ -151,27 +196,109 @@ function fileStatus(filePath: string): "ready" | "missing" | "blocked" {
   }
 }
 
-export function projectMemoryInstructions(role: Role, cwd: string, notebookWriter = false): string {
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function logBootstrapFailure(project: PaseoProject, error: unknown): void {
+  console.error(
+    `[SLP] Project memory bootstrap failed for ${project.projectId} at ${
+      project.projectRootPath
+    }: ${describeError(error)}`,
+  );
+}
+
+export function startProjectMemoryBootstrap(
+  paseo: Pick<PaseoApi, "projects">,
+): ProjectMemoryBootstrapRegistration {
+  let disposed = false;
+  const pending = new Set<Promise<void>>();
+
+  const schedule = (project: PaseoProject): void => {
+    if (disposed) return;
+    let task!: Promise<void>;
+    task = bootstrapProjectMemory(project.projectRootPath)
+      .then((result) => {
+        if (result.created.length > 0) {
+          console.log(
+            `[SLP] Bootstrapped ${result.created.join(
+              ", ",
+            )} for registered project ${project.projectId}`,
+          );
+        }
+        return undefined;
+      })
+      .catch((error) => logBootstrapFailure(project, error))
+      .finally(() => pending.delete(task));
+    pending.add(task);
+  };
+
+  const unsubscribe = paseo.projects.subscribe((update) => {
+    if (update.kind === "upsert") schedule(update.project);
+  });
+  const ready = Promise.resolve()
+    .then(() => paseo.projects.list())
+    .then(({ projects }) => {
+      for (const project of projects) schedule(project);
+      return Promise.all(pending);
+    })
+    .then(() => undefined)
+    .catch((error) => {
+      console.error(`[SLP] Registered project memory backfill failed: ${describeError(error)}`);
+    });
+
+  return {
+    ready,
+    async cleanup() {
+      disposed = true;
+      unsubscribe();
+      await ready;
+      await Promise.all(pending);
+    },
+  };
+}
+
+export function projectMemoryInstructions(
+  role: Role,
+  cwd: string,
+  globalProtocolPath: string,
+): string {
   const root = path.resolve(cwd);
   const protocolPath = path.join(root, workspaceProtocolName);
   const notebookPath = path.join(root, supervisorNotebookName);
   const protocol = fileStatus(protocolPath);
   const notebook = fileStatus(notebookPath);
-  if (role === "peer" || role === "watcher") return "";
+  if (role === "watcher") return "";
+  let readerAction =
+    "Read it before judging a project deviation, relaying a project instruction, or proposing a protocol change.";
   if (role === "lead") {
-    return protocol === "ready"
-      ? `## Project protocol\n\nRead \`${protocolPath}\` before orchestration. Extract only the constraints relevant to each Peer assignment.`
-      : `## Project protocol\n\n\`${protocolPath}\` is ${protocol}. Do not invent repository policy; tell the Human that SLP project-memory bootstrap is owed.`;
+    readerAction =
+      "Read it before orchestration and carry the relevant constraints into each Peer assignment.";
+  } else if (role === "peer") {
+    readerAction =
+      "Read it before project work and apply its tactics inside the exact assignment; ask Lead when a local rule or missing constraint affects the outcome.";
   }
-  const writeInstruction = notebookWriter
-    ? `You hold the project notebook-writer lease. When the notebook is ready, read the relevant
-existing pattern before writing. Record only a novel or material episode or materially stronger
-evidence, and aggregate recurrence under the existing pattern. Preserve hypotheses, outcomes, and disproof.`
-    : `You do not hold the project notebook-writer lease. Never edit the notebook; return a
-PROPOSED_NOTEBOOK_RECORD to the Human when an episode merits durable capture.`;
-  return `## Project causal memory
+  const protocolInstruction =
+    protocol === "ready"
+      ? `## Workspace protocols
 
-Workspace Protocol: \`${protocolPath}\` (${protocol}).
+Read the global protocol at \`${globalProtocolPath}\` first. Then read the
+project-local protocol at \`${protocolPath}\`. ${readerAction}`
+      : `## Workspace protocols
+
+Read the global protocol at \`${globalProtocolPath}\` first. The project-local protocol
+at \`${protocolPath}\` is ${protocol}. Report the exact bootstrap gap and do not invent
+repository policy. Continue only work that does not depend on the missing local policy.`;
+  if (role === "lead" || role === "peer") return protocolInstruction;
+  const writeInstruction = `You automatically hold notebook-write authority for this bound project.
+When the notebook is ready, read the relevant existing pattern before writing. Record only a novel
+or material episode or materially stronger evidence, and aggregate recurrence under the existing
+pattern. Preserve hypotheses, outcomes, and disproof. If another Supervisor is concurrently
+writing, surface the concurrent-writer concern in your handback; do not invent a lock or lease.`;
+  return `${protocolInstruction}
+
+## Project causal memory
+
 Supervisor Notebook: \`${notebookPath}\` (${notebook}).
 
 ${writeInstruction}
@@ -191,27 +318,40 @@ when the mechanism and ownership fit the product constraint; do not use the lens
 
 export async function resolveProjectMemoryRoot(
   cwd: string,
-  paseo: Pick<PluginHandlerContext["paseo"], "workspaces">,
+  paseo: ProjectLookupApi,
 ): Promise<string> {
   const canonicalCwd = await realpathAsync(cwd);
+  const { projects } = await paseo.projects.list();
+  const projectRoots = new Map<string, string>();
+  for (const project of projects) {
+    try {
+      projectRoots.set(project.projectId, await resolveProjectRootPath(project.projectRootPath));
+    } catch {
+      // An unavailable registered project cannot establish identity for this launch.
+    }
+  }
+
+  const directMatches = [...projectRoots.values()].filter((root) => root === canonicalCwd);
+  if (directMatches.length === 1) return directMatches[0]!;
+  if (directMatches.length > 1) {
+    throw new Error(`SLP project memory is ambiguous for registered project directory ${cwd}.`);
+  }
+
   const { entries } = await paseo.workspaces.list();
-  const matches: string[] = [];
+  const matches = new Set<string>();
   for (const entry of entries) {
     try {
-      if (
-        (await realpathAsync(entry.workspaceDirectory)) === canonicalCwd &&
-        entry.projectRootPath
-      ) {
-        matches.push(await realpathAsync(entry.projectRootPath));
+      if ((await realpathAsync(entry.workspaceDirectory)) === canonicalCwd) {
+        const root = projectRoots.get(entry.projectId);
+        if (root) matches.add(root);
       }
     } catch {
       // A stale workspace cannot establish project identity for this launch.
     }
   }
-  const projectRoots = [...new Set(matches)];
-  if (projectRoots.length === 1) return projectRoots[0]!;
-  if (projectRoots.length > 1) {
+  if (matches.size === 1) return [...matches][0]!;
+  if (matches.size > 1) {
     throw new Error(`SLP project memory is ambiguous for workspace directory ${cwd}.`);
   }
-  throw new Error(`SLP cannot bind workspace directory ${cwd} to a project root.`);
+  throw new Error(`SLP cannot bind ${cwd} to a registered Paseo project root.`);
 }

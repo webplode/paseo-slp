@@ -27,6 +27,7 @@ const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_ID
 interface PluginRuntimePort {
   emit?: PluginLifecycle["emit"];
   before?: PluginLifecycle["before"];
+  assertDependencies?: PluginLifecycle["assertDependencies"];
   catalog: PluginRuntime["catalog"];
   invoke(pluginId: string, method: string, input: unknown): Promise<unknown>;
   getLogs(pluginId: string): PluginLogEntry[];
@@ -103,6 +104,14 @@ export class PluginService {
       return this.runtime.before(name, request);
     }
     return request;
+  };
+
+  readonly assertDependencies: PluginLifecycle["assertDependencies"] = (dependencies) => {
+    if (!dependencies || dependencies.length === 0) return;
+    if (!this.runtime.assertDependencies) {
+      throw new Error("Declared plugin dependencies cannot be checked on this host");
+    }
+    this.runtime.assertDependencies(dependencies);
   };
 
   subscribeSettings(listener: (pluginId: string, settingsId: string) => void): () => void {

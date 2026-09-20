@@ -25,6 +25,24 @@ export interface SettingsSelectProps<Value extends string = string> extends Sett
   onValueChange(value: Value): void;
   disabled?: boolean;
 }
+export interface ComposerSelectAction {
+  label: string;
+  onPress(): void;
+  disabled?: boolean;
+}
+export interface ComposerSelectProps<Value extends string = string> {
+  label: string;
+  value: Value;
+  options: readonly { label: string; value: Value }[];
+  onValueChange(value: Value): void;
+  icon: string;
+  displayValue?: string;
+  message?: string;
+  messageTone?: "muted" | "danger";
+  action?: ComposerSelectAction;
+  disabled?: boolean;
+  testID?: string;
+}
 export interface SettingsInputHandle {
   focus(): void;
   blur(): void;
@@ -51,6 +69,9 @@ export declare const SettingsRow: ComponentType<SettingsRowProps>;
 export declare const SettingsSwitch: ComponentType<SettingsSwitchProps>;
 export declare function SettingsSelect<Value extends string>(
   props: SettingsSelectProps<Value>,
+): ReactNode;
+export declare function ComposerSelect<Value extends string>(
+  props: ComposerSelectProps<Value>,
 ): ReactNode;
 export declare const SettingsInput: ComponentType<SettingsInputProps>;
 export declare const SettingsAction: ComponentType<SettingsActionProps>;

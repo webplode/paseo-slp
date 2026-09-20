@@ -1,6 +1,10 @@
 export type {
   PluginHostProps,
   PluginSurfaceProps,
+  PluginDraftComposerProps,
+  PluginDraftComposerProfile,
+  PluginDraftComposerSelection,
+  PluginDraftComposerContribution,
   PluginIconProps,
   PluginPanelLocation,
   PluginOpenPanelOptions,

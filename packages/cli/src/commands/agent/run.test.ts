@@ -1,10 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Command } from "commander";
 import {
+  addRunOptions,
   resolveExistingRunWorkspace,
   resolveRunCallerAgentId,
   runRunCommand,
   type AgentRunOptions,
 } from "./run";
+
+it("parses repeatable plugin dependencies without changing labels", () => {
+  const command = addRunOptions(new Command("run"));
+  command.parse(
+    [
+      "task",
+      "--require-plugin",
+      "example",
+      "--require-plugin",
+      "other",
+      "--label",
+      "example.role=review",
+    ],
+    { from: "user" },
+  );
+  expect(command.opts()).toMatchObject({
+    requirePlugin: ["example", "other"],
+    label: ["example.role=review"],
+  });
+});
 
 describe("managed agent caller context", () => {
   it("propagates a trimmed PASEO_AGENT_ID", () => {
@@ -76,6 +98,17 @@ describe("runRunCommand option validation", () => {
     await expectInvalidOptions(
       { newWorkspace: "worktree", workspace: "ws-1" },
       /--new-workspace and --workspace cannot be combined/,
+    );
+  });
+
+  it("rejects blank plugin dependencies before connecting", async () => {
+    await expectInvalidOptions({ requirePlugin: [" "] }, /--require-plugin/);
+  });
+
+  it("rejects too many plugin dependencies before connecting", async () => {
+    await expectInvalidOptions(
+      { requirePlugin: Array.from({ length: 33 }, (_, index) => `plugin-${index}`) },
+      /--require-plugin/,
     );
   });
 

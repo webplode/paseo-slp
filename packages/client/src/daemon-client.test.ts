@@ -2649,6 +2649,69 @@ test("sends create_agent_request with workspace and caller identity", async () =
   await expect(createPromise).rejects.toThrow("compat test sentinel");
 });
 
+test("sends declared plugin dependencies only when the host advertises support", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "plugin-dependency-wire-test",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { pluginDependencies: true } });
+  await connectPromise;
+
+  const createPromise = client.createAgent({
+    provider: "codex",
+    cwd: "/tmp/project",
+    pluginDependencies: ["slp"],
+  });
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toEqual(
+    expect.objectContaining({
+      type: "create_agent_request",
+      pluginDependencies: ["slp"],
+    }),
+  );
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "status",
+      payload: {
+        status: "agent_create_failed",
+        requestId: request.requestId,
+        error: "dependency test sentinel",
+      },
+    }),
+  );
+  await expect(createPromise).rejects.toThrow("dependency test sentinel");
+});
+
+test("fails closed instead of sending plugin dependencies to an older host", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "plugin-dependency-gate-test",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  await expect(
+    client.createAgent({
+      provider: "codex",
+      cwd: "/tmp/project",
+      pluginDependencies: ["slp"],
+    }),
+  ).rejects.toThrow("Update the host to use plugin-bound agent creation.");
+  expect(mock.sent).toHaveLength(0);
+});
+
 test("sends worktree target and autoArchive in create_agent_request", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

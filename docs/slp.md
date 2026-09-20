@@ -30,10 +30,33 @@ npm run typecheck --prefix slp/plugin
 node packages/cli/dist/index.js plugin install "$PWD/slp/plugin" --host 127.0.0.1:6781
 ```
 
-The plugin uses this fork's small `agent.create` hook extension: read-only creation
-labels. Unmodified upstream v0.8.0 does not expose creation labels to that hook.
-Build the fork before installing this plugin. Plugin source changes need `plugin reload slp`,
+The plugin requires this fork's v0.8.1 client and daemon, including read-only creation
+labels and plugin-bound creation. Unmodified upstream v0.8.0 does not expose creation labels
+to that hook. Build the fork before installing this plugin. Plugin source changes need `plugin reload slp`,
 not a daemon restart.
+
+### Dedicated provider homes
+
+Use the installed Codex and Claude binaries with separate `CODEX_HOME` and
+`CLAUDE_CONFIG_DIR`. Preview the setup before applying it:
+
+```sh
+node slp/setup-provider-homes.mjs
+node slp/setup-provider-homes.mjs --apply
+```
+
+Setup preserves existing configuration and credentials, links the selected Paseo skill bundle,
+and blocks a new home binding when stored native sessions would lose their resume history.
+The existing `.dev/slp-home` Claude history currently blocks that default setup. Resolve the
+resume-home choice before changing it; use a fresh fixture home for isolated verification.
+Authenticate each intended provider home with the provider's own CLI. Setup never copies
+personal credentials, config, or hooks. Authentication environment supplied to a test process
+is temporary and is not delivered home configuration.
+
+Fresh Codex configuration disables native delegation; existing TOML is left unchanged.
+SLP session policy pins Codex's native-agent switches off and pins Claude teams off while
+denying native delegation tools, including after resume. Watcher also disables Codex native
+goals. The homes separate provider configuration and state, not OS or repository access.
 
 ## Roles and execution profiles
 
@@ -47,8 +70,10 @@ it, or refresh an existing one. The plugin uses those native tools on this host.
    using the Supervisor, Watcher, Lead and Peer tabs. Peer has Engineer, Scout, Architect and
    Reviewer subtabs, each with its own profile toggles. Search filters the list; it
    does not change membership. Model settings remain in the native profile editor.
-3. Open **SLP** in the sidebar or the workspace panel. Choose the role, execution
-   profile, workspace and assignment, then launch.
+3. In **New workspace → Chat** or an ordinary workspace draft, choose **SLP role**, then a Peer specialization when
+   applicable. Choose an enabled profile in the native Agent Profile picker and enter the
+   bounded assignment. Provider, model, thinking, and feature controls remain native task
+   overrides. Changing role or provider requires another explicit profile selection.
 
 The same role can use several execution profiles: a cheap scout, a careful reviewer,
 or a different provider for UI work. Role membership is stored as `[slp:peer]`,
@@ -62,16 +87,18 @@ profile catalog, one editor for model settings and one ordinary agent lifecycle.
 
 Lead reads the native `list_profiles` catalog and task-fit notes, chooses a Peer
 specialization and matching profile, then calls native `create_agent` with
-`slp.role`, `slp.profile` and `slp.subrole` labels. The UI launcher makes the same
-selection. The plugin validates specialization membership and appends its instruction
+`slp.role`, `slp.profile` and `slp.subrole` labels and `pluginDependencies: ["slp"]`.
+The native draft composer carries the same selection through the ordinary agent lifecycle.
+The plugin validates specialization membership and appends its instruction
 to the persisted system prompt. Older callers without `slp.subrole` retain generic
 Peer behavior.
 An SLP Watcher is an ordinary child session of one selected Supervisor with an exact
-workspace scope. The launcher records the owner, scope, selected profile, cadence
-(15 minutes by default), budget, optional expiry and stop condition, then asks the
-Watcher to call the Paseo MCP `create_heartbeat` tool for one idempotently named native
-heartbeat; provider-native schedulers and general schedule tools are not part of this flow. Repeating the same launch
-opens the existing active Watcher; the server rejects a duplicate. Every sweep discovers
+workspace scope. The server requires exact reporting-owner, workspace-scope and cadence labels
+and rejects a duplicate qualified creation. The native draft leaves Watcher selection blocked
+until a creation path supplies its complete assignment bounds; no custom launcher collects them.
+Once qualified, the Watcher calls the Paseo MCP `create_heartbeat` tool for one idempotently named
+native heartbeat; provider-native schedulers and general schedule tools are not part of this flow.
+Every sweep discovers
 current Leads and Peers in the scope, so later Leads are covered without another launch.
 The Watcher pages their persisted canonical evidence without loading their providers and
 returns one validated JSON result. Quiet complete sweeps do not notify. Actionable,
@@ -80,7 +107,7 @@ references. Scheduled sweeps, lifecycle doorbells and the one bounded format rep
 explicit machine-route markers. A direct Human request such as a period summary stays visible
 in the Watcher session and is not reinterpreted as a proactive Supervisor alert. When valid
 coverage is absent, the existing direct Supervisor doorbell remains.
-A Supervisor launch can also opt into a delegated Lead-recovery capability;
+A Supervisor creation request can explicitly opt into a delegated Lead-recovery capability;
 the task prompt remains the exact lease and must name the incumbent Lead, workspace,
 allowed profile bounds, expiry and stop condition.
 Provider/model, the verified role-specific `settings.modeId`, and
@@ -88,9 +115,12 @@ Provider/model, the verified role-specific `settings.modeId`, and
 verified task-specific overrides do not mutate the saved profile. No automatic
 model classifier or cost router makes the judgment for the agent.
 
-The plugin validates role membership, injects the canonical role instruction into
-`systemPrompt` before the first turn, and chooses the provider boundary before the
-runtime starts. Lead, Peer and Supervisor use the verified unattended/full-access mode.
+The plugin validates role membership, injects the canonical role instruction and the
+exact global/local protocol paths into `systemPrompt` before the first turn, and chooses
+the provider boundary before the runtime starts. Lead, Peer and Supervisor read
+`$PASEO_HOME/workspace_protocol.md` first and the exact registered project's root
+`WORKSPACE_PROTOCOL.md` second. Watcher receives neither protocol path. Lead, Peer and
+Supervisor use the verified unattended/full-access mode.
 Watcher fails closed unless SLP knows a provider-enforced no-write configuration:
 Codex `read-only`, Antigravity `plan`, or Claude `bypassPermissions` with its SDK
 built-in tool set disabled so only the daemon-injected, caller-scoped Paseo MCP tools
@@ -100,19 +130,32 @@ rules for every injected Paseo MCP tool and no matching ask/deny rule; launch fa
 the provider starts when that qualification is absent. Caller-supplied MCP servers are
 removed from Watcher launches. This is runtime enforcement, not a claim that instructions
 or tool names form an OS sandbox.
-Instructions live in `slp/plugin/server/role-instructions.ts`; routing guidance lives
-beside them in `configure-role.ts`. Existing sessions retain their creation prompt
-on resume, including restoration without a native conversation handle. Changing a
-profile affects future launches. It never rewrites a running agent's role or budget.
+Role instructions live in `slp/plugin/server/role-instructions.ts`; the bootstrap template
+lives in `slp/plugin/server/workspace_protocol.md`; routing guidance lives beside them in
+`configure-role.ts`. The live global file is user-owned after missing-only bootstrap and
+is never overwritten by plugin reload. Existing sessions retain their creation prompt on
+resume, including restoration without a native conversation handle. A path or role change
+therefore applies to fresh sessions instead of silently rewriting an active assignment.
+Changing a profile affects future launches. It never rewrites a running agent's role or
+budget.
 
-## Priority skill bundle
+## Skill bundle
 
-The fork adds four workflows to Paseo's existing `skills/` bundle:
+The fork adds six workflows to Paseo's existing `skills/` bundle. Four are priority
+workflows whose declared triggers are checked before ordinary work:
 
 - `architecture-premise-audit`
 - `test-proof-debt-audit`
 - `frontend-design`
 - `repo-refresh`
+
+Two are review methods:
+
+- `open-code-review-delegate` lets the current Reviewer use OCR for deterministic file
+  selection and rule resolution while the Reviewer model performs semantic analysis.
+- `triple-review` is explicit-only. Lead may invoke it only when the Human or the
+  repository protocol requests three sealed lanes for one stable candidate: two
+  heterogeneous semantic Reviewers and one OCR Delegate coverage Reviewer.
 
 Paseo's existing skill reconciliation installs the same bundle into `.agents/skills`,
 `.claude/skills`, and `.codex/skills`. The shared `.agents` location supplies providers
@@ -120,13 +163,17 @@ that follow the cross-agent convention; native Claude and Codex locations are al
 populated. The default `all` selection adopts these skills automatically, while an
 existing custom selection remains an explicit Human choice.
 
-Every fresh SLP role prompt tells the agent to check these workflows before ordinary
-work and to load an applicable one first. Their narrow triggers remain binding: the
-two audits require the named audit scope, and `repo-refresh` remains explicit-only.
-This is method priority below the Human assignment, role contract, Workspace Protocol,
-ownership, and stop conditions; it is not an authority override or role filter.
+Every fresh SLP role prompt tells the agent to check the four priority workflows before
+ordinary work. Review-method routing stays role-specific: Lead receives the explicit-only
+`triple-review` method, while Reviewer receives `open-code-review-delegate` for assignments
+that call for deterministic coverage. Other roles do not receive either routing method.
+The two audits still require their named audit scope, and `repo-refresh` remains
+explicit-only. These methods remain below the Human assignment, role contract, Workspace
+Protocol, ownership, and stop conditions; they grant no authority.
 
-Council and Ultra Review are deliberately absent from the bundle and SLP policy.
+Council and Ultra Review remain absent from the bundle and default SLP policy. Triple
+Review does not vote. Lead adjudicates the three handbacks and may request a separately
+authorized Council only for a consequential conflict that remains unresolved.
 
 The former role-specific provider aliases and config generator have been removed.
 For an existing development home, remove the generated `codex-{role}` and
@@ -135,9 +182,10 @@ sessions keep their old provider identity. New launches use ordinary providers.
 
 ## Design boundary
 
-Profiles carry durable behavior. `WORKSPACE_PROTOCOL.md` carries repository
-tactics for Lead. An assignment carries today's objective, ownership, authority,
-and evidence. Role names do not belong in daemon admission logic.
+Profiles carry durable behavior. The global Workspace Protocol carries cross-project
+rules; `WORKSPACE_PROTOCOL.md` carries repository tactics for Lead, Peer, and Supervisor.
+An assignment carries today's objective, ownership, authority, and evidence. Role names
+do not belong in daemon admission logic.
 
 An assignment is the ordinary initial prompt for one delegated outcome. Give the
 Peer the outcome, owned scope, material exclusions, relevant repository constraints,
@@ -165,6 +213,33 @@ Roles are behavioral instructions and launch configuration, not a security bound
 Fresh SLP sessions receive the per-agent Paseo tool ceiling described below. Existing
 sessions created without a ceiling retain their previous tool surface.
 
+### Draft composer binding
+
+The SLP draft composer contributes role intent and eligible native profile IDs to the ordinary
+workspace composer. It reuses the native provider/model/profile controls: selecting a role filters
+that picker, and changing role or provider clears the profile so the user must choose it again.
+Model, thinking, and feature edits remain the live draft values and do not get overwritten by the
+saved profile. Role intent and filters stay in the existing draft submission store across tab
+remounts; a plugin render or teardown error keeps the draft blocked instead of falling through to
+ordinary creation.
+
+Every SLP-bound create path carries the same optional generic field:
+
+```ts
+pluginDependencies?: readonly string[]
+```
+
+SLP sends `pluginDependencies: ["slp"]` together with its labels. The field is accepted by the
+workspace composer, SDK, CLI (`--require-plugin slp`), native `create_agent` tool, and `agent.create` hook request. The daemon
+checks the declared plugin IDs before creation and fails closed when one is unavailable; hooks cannot
+change the list. Clients gate non-empty lists on `server_info.features.pluginDependencies`, so an
+older daemon cannot silently create an unbound role session. Omitting the field keeps ordinary
+creation unchanged. This is plugin availability binding, not a role admission rule or a session
+lease.
+
+See the [approved implementation plan](slp-composer-plan.md) for the bounded handoff and
+verification requirements.
+
 ## Implemented bicycle scope
 
 Human accepted this scope on 2026-09-10. The per-agent ceiling and SLP role
@@ -172,8 +247,8 @@ configuration are implemented in this checkout.
 
 Keep eight pieces: role/profile selection, durable role instructions, Peer
 specializations, per-agent Paseo tool ceilings, a small Watcher-to-Supervisor attention route,
-upstream parentage/workspaces/finish notifications, a thin Workspace Protocol, and
-assignments in ordinary prompts.
+upstream parentage/workspaces/finish notifications, a global contract plus thin local
+Workspace Protocols, and assignments in ordinary prompts.
 Native Antigravity remains within the fork's existing provider scope.
 
 The generic ceiling reuses the existing catalog, session persistence, plugin creation
@@ -243,31 +318,41 @@ stop-and-relaunch with the new owner/scope.
 
 ### Project memory bootstrap
 
-The SLP launcher inspects two repo-local files in the selected workspace:
+SLP has one global contract in Paseo home and project memory at the authoritative root of
+each project registered in Paseo:
 
-- `WORKSPACE_PROTOCOL.md` holds the repository tactics Lead reads before orchestration.
+- `$PASEO_HOME/workspace_protocol.md` holds cross-project authority, ownership, continuity,
+  evidence, closure, runtime, and evolution rules read by every Lead, Peer, and Supervisor.
+  `slp/plugin/server/workspace_protocol.md` is its missing-only bootstrap template.
+- `WORKSPACE_PROTOCOL.md` stays below 40 lines and holds only repository-specific scope,
+  risks, design, hotspots, routing, evidence, tests, tracking, anti-patterns, and evolution.
 - `SUPERVISOR_NOTEBOOK.md` holds causal observations across that project's workspaces.
 
-Use **Bootstrap missing files** in the launcher to create only the missing files. The
-plugin resolves the directory from the selected Paseo workspace and uses create-only
-writes; it never replaces an existing file. A directory or other non-regular target
-blocks bootstrap for the Human to resolve.
+On plugin activation, bootstrap the global file, subscribe to native project updates before
+listing registered projects, then bootstrap every registered root. A newly registered project
+triggers the same local bootstrap even when it has no workspace or agent. Writes are missing-only
+and create-only; existing bytes are preserved. A symlink, directory or other blocked target, an
+unavailable root, or an unwritable root is reported as a bootstrap failure. No arbitrary cwd or
+worktree becomes a project root.
 
-At most one active Supervisor holds the project notebook-writer lease. The launcher
-requests that lease by default and fails closed if the project already has a writer.
-Additional Supervisors remain observers: they return a structured
-`PROPOSED_NOTEBOOK_RECORD` instead of editing the shared file. This keeps the notebook
-project-wide without allowing concurrent read-modify-write updates to lose records.
+Before an SLP session starts, the creation hook resolves its cwd to a registered project root
+(directly or through a registered workspace) and ensures both files exist. An unregistered cwd
+fails closed. There is no launch-only project-memory RPC or custom launcher surface.
 
-Lead and Supervisor receive the exact resolved paths and current file status in their
-creation instruction. Peer receives neither file. A missing protocol does not become
-an admission gate. A missing or blocked notebook makes Supervisor return a complete
+Lead, Peer, and Supervisor receive the exact global path first and resolved local protocol
+path second in their creation instruction. Lead reads both before orchestration, Peer before
+project work, and Supervisor before judging a project deviation, relaying a project instruction,
+or proposing a protocol change. Watcher receives neither path. A missing local protocol does
+not become an admission gate: the role reports the exact gap and continues only work independent
+of the missing policy. A missing or blocked notebook makes Supervisor return a complete
 `PROPOSED_NOTEBOOK_RECORD` to the Human instead of creating or replacing the file.
 
-When the notebook is ready, the leased writer Supervisor may update it directly within
-the assignment's project scope. It records only novel/material episodes or materially
-stronger evidence, aggregates recurrence under the existing pattern, and preserves
-disproof. The notebook does not grant product ownership, Lead authority, or acceptance.
+When the notebook is ready, every Supervisor bound to that project automatically has
+notebook-write authority within the assignment's project scope. It records only novel/material
+episodes or materially stronger evidence, aggregates recurrence under the existing pattern, and
+preserves disproof. If another Supervisor is concurrently writing, surface that concern in the
+handback; do not invent a lock or lease. The notebook does not grant product ownership, Lead
+authority, or acceptance.
 
 Structural anti-patterns are a progressive reasoning lens inside the Supervisor launch
 instruction and the broad architecture-audit workflow. The full
@@ -307,7 +392,7 @@ ceiling retain their old configuration; use fresh SLP sessions to adopt this cha
 Council and Ultra Review remain deferred. Room, semantic classifiers,
 additional skill routing, tracker integration, assignment state, generalized no-write machinery,
 and protocol admission are outside this implementation. Project memory stays in the two
-repo-local Markdown files above; there is no notebook database, grant service, or second
+registered project-root Markdown files above; there is no notebook database, grant service, or second
 lifecycle.
 Reconsider an item only for a concrete operating failure and a separate scope
 decision. This plan creates no new tracker.
@@ -382,10 +467,10 @@ Live checks on the isolated host `127.0.0.1:6781` verified:
 
 - Lead selected an Antigravity Peer with `low` thinking and received its handback.
 - Supervisor selected a Codex Lead with `low` thinking and received its handback.
-- UI launch injected Peer instructions and full access; a per-task `low` override
+- The native draft composer injected Peer instructions and full access; a per-task `low` override
   left the saved profile's `max` budget unchanged.
 - Role membership survived UI reload, and a mismatched role/profile was rejected.
-- The launcher remained readable on desktop and a 390px compact viewport.
+- The native SLP composer remained readable on desktop and a 390px compact viewport.
 
 The implemented ceiling was verified on the same isolated host on 2026-09-11.
 Fresh idle readbacks showed no running or starting agents and no active workspace
@@ -397,7 +482,7 @@ session with no allowlist discovered and called the ordinary `list_agents` tool;
 its provider shell tool remained available. No build was installed into the shared
 daemon at `127.0.0.1:6767`.
 
-The attention-trigger and recovery-lease source slice was checked on 2026-09-11 with
+The attention-trigger and recovery source slice was checked on 2026-09-11 with
 25 focused plugin tests, the plugin typecheck, plugin lint, the full workspace
 typecheck, formatting and diff checks. It has not yet been activated on the isolated
 host; the live evidence above covers the preceding role/tool-ceiling candidate.
@@ -425,7 +510,12 @@ unchanged for that validated quiet turn. No shared-daemon activation was perform
 This machine's existing Codex model catalog is incompatible with its CLI. The
 local `.dev/slp-home/config.json` therefore points Codex at `.dev/codex-home`,
 using the existing account authentication and a minimal config. This is a local
-test setup, not a change to global Codex configuration or a fork requirement.
+test setup, not a change to global Codex configuration or a fork requirement. A
+provider home is configuration/state isolation, not an OS sandbox or project
+isolation. A future setup path must use the shared binaries, preserve the Paseo
+skill bundle, and avoid copying personal hooks, plugins, settings, or credentials.
+Do not repoint a main home until authentication and native session-history
+continuation have been checked; existing resumes must remain usable.
 
 ## Lessons retained
 
@@ -442,13 +532,13 @@ test setup, not a change to global Codex configuration or a fork requirement.
 
 ## Sources
 
-The current SLP contract is owned by this document, the root
-[Workspace Protocol](../WORKSPACE_PROTOCOL.md), and the role instructions under
-`slp/plugin/server/`. Historical books, transcripts, and Demonthorn source material
+The current SLP contract is owned by this document, the global protocol template and role
+instructions under `slp/plugin/server/`, the user-owned live global file, and the root
+[Workspace Protocol](../WORKSPACE_PROTOCOL.md). Historical books, transcripts, and Demonthorn source material
 remain provenance in the retired Foundation repository's Git history; this checkout
 does not read them at launch or depend on an adjacent Foundation checkout.
 
-Implementation references: [codex-room-setup at a38c5ce](https://github.com/hoangnb24/codex-room-setup/tree/a38c5ceaa0e30aa709a917136fdeaa6de2925993/home/.config/codex-room/overlays)
+Implementation references: [codex-room-setup at db4e4d7](https://github.com/hoangnb24/codex-room-setup/tree/db4e4d7053f067295b88f9262d0bccfe11685ddf/home/.config/codex-room/overlays)
 and [repository-harness at e765792](https://github.com/hoangnb24/repository-harness/tree/e765792b635b4d5e3e5fc0578f82f9ca5dea2681).
 Borrow the role boundaries and readable configuration, without importing their
 installers or historical runtime machinery.

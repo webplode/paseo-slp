@@ -1,6 +1,7 @@
 export type {
   PluginHandlerContext,
   PluginServerContext,
+  PluginServerActivationContext,
   PluginServerContribution,
 } from "./contracts.js";
 export type {

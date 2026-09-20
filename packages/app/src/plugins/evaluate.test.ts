@@ -197,6 +197,35 @@ describe("evaluatePluginClientBundle", () => {
     ]);
   });
 
+  it("collects and cleans draft composer contributions", async () => {
+    const plugin = evaluatePluginClientBundle(
+      "draft-composer",
+      bundle(`
+        function Composer() { return null; }
+        plugin.addDraftComposer({ id: "roles", Component: Composer });
+      `),
+    );
+
+    expect(plugin.draftComposers).toHaveLength(1);
+    expect(plugin.draftComposers?.[0]?.id).toBe("roles");
+    await plugin.cleanup();
+    expect(plugin.draftComposers).toHaveLength(0);
+  });
+
+  it("rejects duplicate draft composer ids", () => {
+    expect(() =>
+      evaluatePluginClientBundle(
+        "draft-composer",
+        bundle(`
+          function Composer() { return null; }
+          const contribution = { id: "roles", Component: Composer };
+          plugin.addDraftComposer(contribution);
+          plugin.addDraftComposer(contribution);
+        `),
+      ),
+    ).toThrow("Duplicate draft composer: roles");
+  });
+
   it("collects a declarative attachment source", () => {
     const plugin = evaluatePluginClientBundle(
       "linear",

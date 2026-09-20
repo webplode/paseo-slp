@@ -24,6 +24,7 @@ import {
   type PluginTimelineTransformerContribution,
   type PluginWorkspacePanelContribution,
   type PluginButtonRegistration,
+  type PluginDraftComposerContribution,
 } from "@getpaseo/plugin/client";
 import type { EvaluatedPlugin } from "./types";
 import type { ComponentType } from "react";
@@ -86,10 +87,13 @@ export function runPluginClientBundle(
   runtime: PluginClientRuntime,
   onChange: () => void = () => undefined,
 ): EvaluatedPlugin {
-  const collector: Omit<EvaluatedPlugin, "id" | "cleanup"> = {
+  const collector: Omit<EvaluatedPlugin, "id" | "cleanup"> & {
+    draftComposers: PluginDraftComposerContribution[];
+  } = {
     surfaces: [],
     settingsScreens: [],
     sidebarItems: [],
+    draftComposers: [],
     workspacePanels: [],
     commandCenterItems: [],
     clientSlashCommands: [],
@@ -101,6 +105,7 @@ export function runPluginClientBundle(
   const surfaceIds = new Set<string>();
   const settingsScreenIds = new Set<string>();
   const sidebarItemIds = new Set<string>();
+  const draftComposerIds = new Set<string>();
   const workspacePanelIds = new Set<string>();
   const commandCenterItemIds = new Set<string>();
   const clientSlashCommandNames = new Set<string>();
@@ -216,6 +221,19 @@ export function runPluginClientBundle(
           locations,
         },
         () => workspacePanelIds.delete(normalizedId),
+      );
+    },
+    addDraftComposer(contribution: PluginDraftComposerContribution) {
+      const normalizedId = requireId(contribution.id, "draft composer id");
+      if (draftComposerIds.has(normalizedId)) {
+        throw new Error(`Duplicate draft composer: ${normalizedId}`);
+      }
+      if (typeof contribution.Component !== "function") {
+        throw new Error(`Draft composer ${normalizedId} is not a component`);
+      }
+      draftComposerIds.add(normalizedId);
+      return register(collector.draftComposers, { ...contribution, id: normalizedId }, () =>
+        draftComposerIds.delete(normalizedId),
       );
     },
     addCommandCenterItem(contribution: PluginCommandCenterItemContribution) {
@@ -438,6 +456,7 @@ export function runPluginClientBundle(
     surfaces: collector.surfaces,
     settingsScreens: collector.settingsScreens,
     sidebarItems: collector.sidebarItems,
+    draftComposers: collector.draftComposers,
     workspacePanels: collector.workspacePanels as EvaluatedPlugin["workspacePanels"],
     commandCenterItems: collector.commandCenterItems,
     clientSlashCommands: collector.clientSlashCommands,

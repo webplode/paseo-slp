@@ -107,6 +107,7 @@ import {
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import {
   applyCodexToolPolicy,
+  mergeCodexProviderOptions,
   CodexProviderOptionsSchema,
   type CodexProviderOptions,
 } from "./codex/options.js";
@@ -5144,11 +5145,10 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private buildCodexInnerConfig(): Record<string, unknown> | null {
-    const innerConfig: Record<string, unknown> = {};
-    Object.assign(innerConfig, this.providerOptions);
-    if (this.deps.customCodexConfig) {
-      Object.assign(innerConfig, this.deps.customCodexConfig);
-    }
+    const innerConfig = mergeCodexProviderOptions(
+      this.deps.customCodexConfig,
+      this.providerOptions,
+    );
     if (this.config.mcpServers) {
       const mcpServers: Record<string, CodexMcpServerConfig> = {};
       for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
@@ -7027,6 +7027,12 @@ export class CodexAppServerAgentClient implements AgentClient {
     const args = [...launchPrefix.args, "app-server"];
     if (options?.goalsEnabled) {
       args.push("--enable", "goals");
+    } else if (options?.goalsEnabled === false) {
+      // Use a config override rather than --disable so older binaries which
+      // lack this feature still accept an explicit false session option.
+      // Keep -c in the parent argument list: a subcommand-local config list
+      // replaces parent -c values (including custom model-provider endpoints).
+      args.splice(args.length - 1, 0, "-c", "features.goals=false");
     }
     this.logger.trace(
       {
@@ -7062,7 +7068,9 @@ export class CodexAppServerAgentClient implements AgentClient {
       // utility generations through `codex exec --ephemeral` in a larger change.
     }
     const sessionConfig: AgentSessionConfig = { ...config, provider: CODEX_PROVIDER };
-    const goalsEnabled = await this.resolveGoalsEnabled();
+    const providerOptions = CodexProviderOptionsSchema.parse(sessionConfig.providerOptions ?? {});
+    const goalsEnabled =
+      (await this.resolveGoalsEnabled()) && providerOptions.features?.goals !== false;
     const autoReviewEnabled = await this.resolveAutoReviewEnabled();
     const session = new CodexAppServerAgentSession(
       sessionConfig,
@@ -7093,7 +7101,9 @@ export class CodexAppServerAgentClient implements AgentClient {
       provider: CODEX_PROVIDER,
       cwd: overrides?.cwd ?? storedConfig.cwd ?? process.cwd(),
     };
-    const goalsEnabled = await this.resolveGoalsEnabled();
+    const providerOptions = CodexProviderOptionsSchema.parse(merged.providerOptions ?? {});
+    const goalsEnabled =
+      (await this.resolveGoalsEnabled()) && providerOptions.features?.goals !== false;
     const autoReviewEnabled = await this.resolveAutoReviewEnabled();
     const session = new CodexAppServerAgentSession(
       merged,

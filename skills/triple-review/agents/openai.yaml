@@ -1,0 +1,6 @@
+interface:
+  display_name: "Triple Review"
+  short_description: "Three sealed lanes for high-risk review"
+  default_prompt: "Use $triple-review only after an explicit Human or Workspace Protocol request to review this exact stable candidate."
+policy:
+  allow_implicit_invocation: false

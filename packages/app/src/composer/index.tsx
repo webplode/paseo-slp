@@ -306,6 +306,7 @@ function resolveContextWindowPlacement(
 
 interface RenderLeftContentArgs {
   agentControls: DraftAgentControlsProps | undefined;
+  draftComposerControls?: ReactNode;
   agentId: string;
   serverId: string;
   focusInput: () => void;
@@ -314,10 +315,18 @@ interface RenderLeftContentArgs {
 }
 
 function renderLeftContent(args: RenderLeftContentArgs): ReactElement | null {
-  const { agentControls, agentId, serverId, focusInput, isCompactLayout } = args;
+  const { agentControls, draftComposerControls, agentId, serverId, focusInput, isCompactLayout } =
+    args;
   if (!args.showAgentControls) return null;
   if (resolveAgentControlsMode(agentControls) === "draft" && agentControls) {
-    return <DraftAgentControls {...agentControls} isCompactLayout={isCompactLayout} />;
+    return (
+      <>
+        {draftComposerControls ? (
+          <View style={styles.draftComposerControls}>{draftComposerControls}</View>
+        ) : null}
+        <DraftAgentControls {...agentControls} isCompactLayout={isCompactLayout} />
+      </>
+    );
   }
   return (
     <AgentControls
@@ -960,6 +969,8 @@ interface ComposerProps {
   onAttentionPromptSend?: () => void;
   /** Controlled agent controls rendered in input area (draft flows). */
   agentControls?: DraftAgentControlsProps;
+  /** Generic plugin controls rendered alongside draft provider controls. */
+  draftComposerControls?: ReactNode;
   /** Extra styles merged onto the message input wrapper (e.g. elevated background). */
   inputWrapperStyle?: import("react-native").ViewStyle;
   /** When true, a parent wrapper owns the keyboard shift, so the composer skips its own. */
@@ -1176,6 +1187,7 @@ function ComposerContentImpl({
   onAttentionInputFocus,
   onAttentionPromptSend,
   agentControls,
+  draftComposerControls,
   inputWrapperStyle,
   externalKeyboardShift,
   isCompactLayout: isCompactLayoutOverride,
@@ -2144,13 +2156,22 @@ function ComposerContentImpl({
     () =>
       renderLeftContent({
         agentControls,
+        draftComposerControls,
         agentId,
         serverId,
         focusInput,
         isCompactLayout,
         showAgentControls: mode.showAgentControls,
       }),
-    [agentControls, agentId, focusInput, isCompactLayout, mode.showAgentControls, serverId],
+    [
+      agentControls,
+      draftComposerControls,
+      agentId,
+      focusInput,
+      isCompactLayout,
+      mode.showAgentControls,
+      serverId,
+    ],
   );
 
   const handleAttachButtonRef = useCallback((node: View | null) => {
@@ -2438,6 +2459,14 @@ const styles = StyleSheet.create((theme: Theme) => ({
     width: "100%",
     maxWidth: MAX_CONTENT_WIDTH,
     gap: theme.spacing[3],
+  },
+  draftComposerControls: {
+    minWidth: 0,
+    flexShrink: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: theme.spacing[2],
   },
   messageInputContainer: {
     flexShrink: 1,

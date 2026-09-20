@@ -18,10 +18,14 @@ function hasCompletedAgentTurn(events: readonly AgentStreamEvent[]): boolean {
   return events.some((event) => event.type === "turn_completed");
 }
 
-async function createPlugin(id: string, source: string): Promise<string> {
+async function createPlugin(
+  id: string,
+  source: string,
+  manifest: Record<string, unknown> = { id },
+): Promise<string> {
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-"));
   temporaryDirectories.push(directory);
-  await writeFile(path.join(directory, "paseo-plugin.json"), JSON.stringify({ id }), "utf8");
+  await writeFile(path.join(directory, "paseo-plugin.json"), JSON.stringify(manifest), "utf8");
   await writeFile(path.join(directory, "index.server.ts"), source, "utf8");
   return directory;
 }
@@ -122,6 +126,77 @@ function createTestRuntime(
   });
 }
 
+function createProjectAwareSessionHost(projects: readonly { projectId: string; root: string }[]) {
+  let socket: PluginSessionSocket | null = null;
+  const sendSessionMessage = (message: unknown): void => {
+    socket?.send(JSON.stringify({ type: "session", message }));
+  };
+  const host = {
+    async attachPluginSocket(_pluginId: string, attached: PluginSessionSocket) {
+      socket = attached;
+      const closed = new Promise<void>((resolve) => attached.once("close", resolve));
+      attached.on("message", (data) => {
+        if (typeof data !== "string") return;
+        const envelope = JSON.parse(data) as { type?: string; message?: { type?: string } };
+        if (envelope.type === "hello") {
+          sendSessionMessage({
+            type: "status",
+            payload: {
+              status: "server_info",
+              serverId: "project-aware-plugin-test",
+              hostname: "project-aware-plugin-test",
+              version: "0.8.1",
+              features: { explicitEventSubscriptions: true, projectUpdates: true },
+            },
+          });
+          return;
+        }
+        if (envelope.type !== "session" || !envelope.message) return;
+        const message = envelope.message as { type: string; requestId?: string };
+        if (message.type === "session.events.set_subscription.request") {
+          sendSessionMessage({
+            type: "session.events.set_subscription.response",
+            payload: { requestId: message.requestId },
+          });
+          return;
+        }
+        if (message.type === "project.list.request") {
+          sendSessionMessage({
+            type: "project.list.response",
+            payload: {
+              requestId: message.requestId,
+              projects: projects.map(({ projectId, root }) => ({
+                projectId,
+                projectDisplayName: projectId,
+                projectRootPath: root,
+                projectKind: "directory",
+              })),
+            },
+          });
+        }
+      });
+      return { closed };
+    },
+  };
+  return {
+    host,
+    emitProjectUpdate(project: { projectId: string; root: string }): void {
+      sendSessionMessage({
+        type: "project.update",
+        payload: {
+          kind: "upsert",
+          project: {
+            projectId: project.projectId,
+            projectDisplayName: project.projectId,
+            projectRootPath: project.root,
+            projectKind: "directory",
+          },
+        },
+      });
+    },
+  };
+}
+
 function createTrackedSessionHost() {
   const active = new Set<object>();
   return {
@@ -208,6 +283,61 @@ afterEach(async () => {
 });
 
 describe("PluginRuntime", () => {
+  it("passes the connected Paseo API to server contribution activation", async () => {
+    const projectRoot = await mkdtemp(path.join(tmpdir(), "paseo-plugin-activation-project-"));
+    temporaryDirectories.push(projectRoot);
+    const addedProjectRoot = await mkdtemp(path.join(tmpdir(), "paseo-plugin-activation-added-"));
+    temporaryDirectories.push(addedProjectRoot);
+    const directory = await createPlugin(
+      "activation-api",
+      `import { defineRpc } from "@getpaseo/plugin";
+import { z } from "zod";
+const seen = [];
+const getSeen = defineRpc({ name: "activation.seen", input: z.object({}), output: z.array(z.string()) });
+export default function contribute(server, { paseo }) {
+  paseo.projects.subscribe((update) => {
+    if (update.kind === "upsert") seen.push(update.project.projectId);
+  });
+  void paseo.projects.list().then(({ projects }) => {
+    for (const project of projects) seen.push(project.projectId);
+  });
+  server.handle(getSeen, () => seen);
+  return () => {};
+}`,
+      { id: "activation-api", requirements: { paseo: ">=0.8.0" } },
+    );
+    const session = createProjectAwareSessionHost([{ projectId: "existing", root: projectRoot }]);
+    const runtime = createTestRuntime({ sessionHost: session.host }, undefined, "0.8.1");
+    await runtime.startPlugin("activation-api", directory);
+
+    await expect
+      .poll(() => runtime.invoke("activation-api", "activation.seen", {}))
+      .toEqual(["existing"]);
+    session.emitProjectUpdate({ projectId: "added", root: addedProjectRoot });
+    await expect
+      .poll(() => runtime.invoke("activation-api", "activation.seen", {}))
+      .toEqual(["existing", "added"]);
+
+    await runtime.stopAll();
+  });
+
+  it("fails closed for unavailable declared dependencies without changing ordinary creation", async () => {
+    const runtime = createTestRuntime({}, pino({ level: "silent" }), "0.8.1");
+
+    await expect(
+      runtime.before("agent.create", {
+        config: { provider: "codex", cwd: "/tmp" },
+        pluginDependencies: ["slp"],
+      }),
+    ).rejects.toThrow("Required plugin is unavailable: slp");
+
+    await expect(
+      runtime.before("agent.create", {
+        config: { provider: "codex", cwd: "/tmp" },
+      }),
+    ).resolves.toEqual({ config: { provider: "codex", cwd: "/tmp" } });
+  });
+
   it.each([
     { specifier: "@getpaseo/plugin", moduleDirectory: "shared" },
     { specifier: "@getpaseo/plugin", moduleDirectory: "server" },

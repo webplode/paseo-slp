@@ -11,6 +11,8 @@ export interface WorkspaceDraftAgentRequest {
   clientMessageId: string;
   images?: UserMessageImageAttachment[];
   attachments?: CreateAgentRequestMessage["attachments"];
+  labels?: Readonly<Record<string, string>>;
+  pluginDependencies?: readonly string[];
 }
 
 /**
@@ -30,6 +32,10 @@ export async function requestWorkspaceDraftAgent(
     ...(images && images.length > 0 ? { images } : {}),
     ...(request.attachments && request.attachments.length > 0
       ? { attachments: request.attachments }
+      : {}),
+    ...(request.labels && Object.keys(request.labels).length > 0 ? { labels: request.labels } : {}),
+    ...(request.pluginDependencies && request.pluginDependencies.length > 0
+      ? { pluginDependencies: [...request.pluginDependencies] }
       : {}),
   });
 }

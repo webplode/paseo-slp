@@ -40,6 +40,46 @@ interface PluginNavigableHostProps extends PluginHostProps {
 
 export interface PluginSurfaceProps extends PluginNavigableHostProps {}
 
+/** A provider/profile bundle selected by a draft composer contribution. */
+export interface PluginDraftComposerProfile {
+  id: string;
+  provider: string;
+  modelId?: string;
+  modeId?: string;
+  thinkingOptionId?: string;
+  featureValues?: Record<string, unknown>;
+}
+
+/** Metadata a draft contribution contributes to the eventual create request. */
+export interface PluginDraftComposerSelection {
+  ready: boolean;
+  profile?: PluginDraftComposerProfile;
+  /** Native profile ids eligible for the currently selected role, when scoped. */
+  profileIds?: readonly string[];
+  /** Plugin ids that must remain loaded while the draft is created. */
+  dependencies?: readonly string[];
+  labels?: Readonly<Record<string, string>>;
+  error?: string;
+}
+
+export interface PluginDraftComposerProps extends PluginHostProps {
+  /** The workspace id once creation has completed; undefined on New workspace. */
+  workspaceId?: string;
+  cwd: string;
+  availableProviders: readonly string[];
+  disabled?: boolean;
+  selection?: PluginDraftComposerSelection;
+  selectedProfileId?: string;
+  clearProfileSelection?(): void;
+  onSelectionChange(selection: PluginDraftComposerSelection): void;
+  openSettings?(): void;
+}
+
+export interface PluginDraftComposerContribution {
+  id: string;
+  Component: ComponentType<PluginDraftComposerProps>;
+}
+
 export interface PluginIconProps {
   name: string;
   size?: number;
@@ -84,6 +124,7 @@ export interface PluginClientContext extends PluginCommandCapabilities {
   addSlashCommand(contribution: PluginClientSlashCommandContribution): PluginCleanup;
   addHeaderButton(contribution: PluginHeaderButtonContribution): PluginButtonRegistration;
   addComposerPill(contribution: PluginComposerPillContribution): PluginButtonRegistration;
+  addDraftComposer(contribution: PluginDraftComposerContribution): PluginCleanup;
   addAttachmentSource(contribution: PluginAttachmentSourceContribution): PluginCleanup;
   addTheme(contribution: PluginThemeContribution): PluginCleanup;
   addTimelineTransformer<ItemType extends AgentTimelineItem["type"]>(

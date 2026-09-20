@@ -339,6 +339,14 @@ export class PluginRuntime {
       .sort((left, right) => left.id.localeCompare(right.id));
   }
 
+  assertDependencies(dependencies?: readonly string[]): void {
+    for (const dependency of dependencies ?? []) {
+      if (!this.plugins.has(dependency)) {
+        throw new Error(`Required plugin is unavailable: ${dependency}`);
+      }
+    }
+  }
+
   getProviderRegistrations(pluginId: string): readonly PluginProviderMetadata[] {
     return this.plugins.get(pluginId)?.providers ?? [];
   }
@@ -455,6 +463,9 @@ export class PluginRuntime {
     input: PluginBeforeRequests[Name],
   ): Promise<PluginBeforeRequests[Name]> {
     let request = validateBeforeRequest(name, input);
+    if (name === "agent.create") {
+      this.assertDependencies((request as PluginBeforeRequests["agent.create"]).pluginDependencies);
+    }
     const plugins = [...this.plugins.values()].sort((left, right) => {
       return left.id.localeCompare(right.id);
     });
@@ -476,6 +487,9 @@ export class PluginRuntime {
           cause: error,
         });
       }
+    }
+    if (name === "agent.create") {
+      this.assertDependencies((request as PluginBeforeRequests["agent.create"]).pluginDependencies);
     }
     return request;
   }

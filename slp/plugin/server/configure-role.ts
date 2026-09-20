@@ -4,8 +4,6 @@ import {
   getProfilePeerSubroles,
   recoveryLeaseLabel,
   recoveryLeaseValue,
-  notebookWriterLabel,
-  notebookWriterValue,
   peerSubroles,
   roles,
   watcherCadenceLabel,
@@ -15,7 +13,12 @@ import {
   type PeerSubrole,
 } from "../shared/roles";
 import { roleInstructions, peerInstructions, prioritySkillInstructions } from "./role-instructions";
-import { projectMemoryInstructions, resolveProjectMemoryRoot } from "./project-memory";
+import {
+  bootstrapProjectMemory,
+  projectMemoryInstructions,
+  resolveProjectMemoryRoot,
+} from "./project-memory";
+import { resolveGlobalWorkspaceProtocolPath } from "./global-workspace-protocol";
 
 type Request = PluginBeforeRequests["agent.create"];
 type Paseo = PluginHookContext["paseo"];
@@ -34,6 +37,29 @@ const watcherNoWriteModeIds: Record<string, string> = {
   claude: "bypassPermissions",
   antigravity: "plan",
 };
+
+const builtinProviderFamilies = new Set([
+  "codex",
+  "claude",
+  "antigravity",
+  "copilot",
+  "opencode",
+  "pi",
+  "omp",
+  "cursor",
+]);
+
+function resolveProviderFamily(
+  provider: string,
+  providers: Record<string, unknown> | undefined,
+): string {
+  const base = optionRecord(providers?.[provider]).extends;
+  if (typeof base === "string" && builtinProviderFamilies.has(base)) return base;
+  if (base === undefined && builtinProviderFamilies.has(provider)) return provider;
+  throw new Error(
+    `SLP cannot qualify provider ${provider}: a supported base provider must be declared in host config.`,
+  );
+}
 
 function resolveRoleMode(
   role: Role,
@@ -61,9 +87,70 @@ function resolveRoleMode(
   return fullAccess.id;
 }
 
-function applyRoleRuntimeBoundary(config: Request["config"], role: Role): Request["config"] {
+function optionRecord(value: unknown): NonNullable<Request["config"]["providerOptions"]> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as NonNullable<Request["config"]["providerOptions"]>)
+    : {};
+}
+
+function applyNativeDelegationBoundary(
+  config: Request["config"],
+  providerFamily: string,
+): Request["config"] {
+  const options = config.providerOptions ?? {};
+  if (providerFamily === "codex") {
+    return {
+      ...config,
+      providerOptions: {
+        ...options,
+        features: {
+          ...optionRecord(options.features),
+          multi_agent: false,
+          multi_agent_v2: false,
+        },
+        agents: { ...optionRecord(options.agents), enabled: false },
+      },
+    };
+  }
+  if (providerFamily === "claude") {
+    const settings = optionRecord(options.settings);
+    return {
+      ...config,
+      providerOptions: {
+        ...options,
+        // Bare tool names remove availability, including the legacy Task alias.
+        disallowedTools: [
+          ...new Set([
+            ...(Array.isArray(options.disallowedTools) ? options.disallowedTools : []),
+            "Agent",
+            "Task",
+            // Current Claude can message/resume native children without Agent.
+            "SendMessage",
+          ]),
+        ],
+        // SDK settings override user/project/local settings; shell env alone
+        // does not pin this when project settings enable teams.
+        settings: {
+          ...settings,
+          env: {
+            ...optionRecord(settings.env),
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0",
+          },
+        },
+      },
+    };
+  }
+  return config;
+}
+
+function applyRoleRuntimeBoundary(
+  requestConfig: Request["config"],
+  role: Role,
+  providerFamily: string,
+): Request["config"] {
+  const config = applyNativeDelegationBoundary(requestConfig, providerFamily);
   if (role !== "watcher") {
-    return config.provider === "codex"
+    return providerFamily === "codex"
       ? {
           ...config,
           providerOptions: {
@@ -79,17 +166,23 @@ function applyRoleRuntimeBoundary(config: Request["config"], role: Role): Reques
   // Discard caller-supplied MCP servers so the bounded role cannot inherit a
   // second control plane. The daemon injects Paseo after this hook.
   const { mcpServers: _externalMcpServers, toolPolicy: _externalToolPolicy, ...bounded } = config;
-  if (config.provider === "codex") {
+  if (providerFamily === "codex") {
     return {
       ...bounded,
       providerOptions: {
         ...config.providerOptions,
+        // A Watcher's only continuation source is its scoped Paseo heartbeat.
+        // Native persisted goals can auto-continue outside that cadence/budget.
+        features: {
+          ...optionRecord(config.providerOptions?.features),
+          goals: false,
+        },
         sandbox_mode: "read-only",
         approval_policy: "never",
       },
     };
   }
-  if (config.provider === "claude") {
+  if (providerFamily === "claude") {
     return {
       ...bounded,
       providerOptions: {
@@ -166,10 +259,6 @@ function hasRecoveryLease(request: Request, role: Role): boolean {
   return role === "supervisor" && request.labels?.[recoveryLeaseLabel] === recoveryLeaseValue;
 }
 
-function hasNotebookWriterLease(request: Request, role: Role): boolean {
-  return role === "supervisor" && request.labels?.[notebookWriterLabel] === notebookWriterValue;
-}
-
 function enforceProviderRole(provider: string, role: Role): void {
   if (provider === "antigravity" && (role === "lead" || role === "supervisor")) {
     throw new Error("Antigravity profiles may serve SLP Watcher or Peer, not Lead or Supervisor.");
@@ -189,11 +278,10 @@ already unavailable. Replace at most one Lead, keep the same workspace, send a c
 handoff of accepted decisions, ownership, unknowns and next action, then report the
 action to the Human. Do not create a Peer or turn recovery into a second command chain.
 If any lease field is absent or ambiguous, report BLOCKED instead of launching.`
-      : `## Human launcher route
+      : `## Lead recovery boundary
 
-Do not create or replace a Lead through your tools. The Human uses the existing SLP
-launcher for that lifecycle operation and chooses the Lead's profile, provider, model,
-budget and full-access mode there. You may ask the Lead a bounded question or relay a
+You do not have delegated Lead-recovery capability in this session. Do not create or
+replace a Lead through your tools. You may ask the Lead a bounded question or relay a
 Human decision with send_agent_prompt, but you do not create a second command chain or
 direct a Peer.`;
   }
@@ -262,32 +350,6 @@ function parseRoleLabels(request: Request) {
   return { role, profileId, subrole };
 }
 
-async function enforceNotebookWriterLease(
-  projectRoot: string,
-  paseo: Paseo,
-  requested: boolean,
-): Promise<void> {
-  if (!requested) return;
-  const existing = await paseo.agents.list({
-    filter: {
-      labels: { "slp.role": "supervisor", [notebookWriterLabel]: notebookWriterValue },
-      includeArchived: false,
-    },
-    page: { limit: 200 },
-  });
-  for (const entry of existing.entries) {
-    const agent = entry.agent;
-    if (!agent.workspaceId || agent.status === "closed") continue;
-    const workspace = await paseo.workspaces.ref(agent.workspaceId).refresh();
-    if (
-      workspace?.projectRootPath &&
-      (await resolveProjectMemoryRoot(workspace.workspaceDirectory, paseo)) === projectRoot
-    ) {
-      throw new Error(`Project ${projectRoot} already has an active Supervisor notebook writer.`);
-    }
-  }
-}
-
 async function enforceWatcherAssignment(request: Request, paseo: Paseo): Promise<void> {
   const labels = request.labels ?? {};
   const supervisorId = labels[watcherSupervisorLabel];
@@ -325,18 +387,23 @@ async function enforceWatcherAssignment(request: Request, paseo: Paseo): Promise
   });
   if (existing.entries.length > 0) {
     throw new Error(
-      `Watcher ${existing.entries[0]!.agent.id} already covers Supervisor ${supervisorId} in workspace ${scopeWorkspaceId}.`,
+      `Watcher ${
+        existing.entries[0]!.agent.id
+      } already covers Supervisor ${supervisorId} in workspace ${scopeWorkspaceId}.`,
     );
   }
 }
 
 // oxlint-disable-next-line complexity
-export async function configureRole(request: Request, paseo: Paseo): Promise<Request> {
+export async function configureRole(
+  request: Request,
+  paseo: Paseo,
+  globalProtocolPath = resolveGlobalWorkspaceProtocolPath(),
+): Promise<Request> {
   const selection = parseRoleLabels(request);
   if (!selection) return request;
   const { role, profileId, subrole } = selection;
   const recoveryAllowed = hasRecoveryLease(request, role);
-  const notebookWriter = hasNotebookWriterLease(request, role);
   if (role === "watcher") await enforceWatcherAssignment(request, paseo);
   const { config } = await paseo.config.get();
   const matches = config.agentProfiles?.filter((item) => item.id === profileId) ?? [];
@@ -358,20 +425,21 @@ export async function configureRole(request: Request, paseo: Paseo): Promise<Req
       `Profile ${profileId} uses ${profile.provider}, not ${request.config.provider}.`,
     );
   }
-  enforceProviderRole(profile.provider, role);
+  const providerFamily = resolveProviderFamily(profile.provider, config.providers);
+  enforceProviderRole(providerFamily, role);
   const catalog = await paseo.providers.listModes(request.config.provider, {
     cwd: request.config.cwd,
   });
   if (catalog.error) throw new Error(catalog.error);
-  const modeId = resolveRoleMode(role, profile.provider, catalog.modes);
+  const modeId = resolveRoleMode(role, providerFamily, catalog.modes);
   const projectRoot = await resolveProjectMemoryRoot(request.config.cwd, paseo);
-  await enforceNotebookWriterLease(projectRoot, paseo, notebookWriter);
+  await bootstrapProjectMemory(projectRoot);
 
   const instructions = [
     roleInstructions[role],
     prioritySkillInstructions,
     subrole ? peerInstructions[subrole] : "",
-    projectMemoryInstructions(role, projectRoot, notebookWriter),
+    projectMemoryInstructions(role, projectRoot, globalProtocolPath),
     delegationInstructions(role, recoveryAllowed),
   ]
     .filter(Boolean)
@@ -396,6 +464,7 @@ export async function configureRole(request: Request, paseo: Paseo): Promise<Req
       systemPrompt: [instructions, request.config.systemPrompt].filter(Boolean).join("\n\n"),
     },
     role,
+    providerFamily,
   );
   return {
     ...request,
